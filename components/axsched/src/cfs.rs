@@ -156,6 +156,7 @@ impl<T> CFScheduler<T> {
 
 impl<T> BaseScheduler for CFScheduler<T> {
     type SchedItem = Arc<CFSTask<T>>;
+    const REQUIRES_PERIODIC_TICK: bool = true;
 
     fn init(&mut self) {}
 

@@ -39,6 +39,18 @@ impl IrqNotify {
         self.wait.notify_one_from_irq();
     }
 
+    /// Publishes a pending notification from IRQ context without asking the
+    /// current foreground task to reschedule.
+    ///
+    /// This is a recovery path for work that normally completes synchronously
+    /// on IRQ return but still needs a task-context owner if the IRQ interrupted
+    /// unrelated host code. The worker becomes runnable and drains the pending
+    /// bit at the next scheduling point.
+    pub fn notify_irq_background(&self) {
+        self.pending.store(true, Ordering::Release);
+        self.wait.notify_one(false);
+    }
+
     /// Publishes a pending notification from task context.
     ///
     /// Prefer [`notify_irq`](Self::notify_irq) inside hard IRQ callbacks. This

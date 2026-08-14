@@ -191,12 +191,13 @@ pub(crate) struct VmRuntimeHandle {
     deferred_reset_requested: AtomicBool,
 }
 
-#[cfg(any(target_arch = "aarch64", test))]
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64", test))]
 pub(crate) struct VcpuEventWaitSnapshot {
+    vcpu_id: usize,
     notification_generation: usize,
 }
 
-#[cfg(any(target_arch = "aarch64", test))]
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64", test))]
 pub(crate) fn wait_for_vcpu_event_if_idle(
     runtime: &VmRuntimeHandle,
     wait_snapshot: &VcpuEventWaitSnapshot,
@@ -392,14 +393,15 @@ impl VmRuntimeHandle {
         self.wait_queue.wait_until(condition);
     }
 
-    #[cfg(any(target_arch = "aarch64", test))]
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64", test))]
     pub(crate) fn notification_generation(&self) -> usize {
         self.notification_generation.load(Ordering::Acquire)
     }
 
-    #[cfg(any(target_arch = "aarch64", test))]
-    pub(crate) fn vcpu_event_wait_snapshot(&self) -> VcpuEventWaitSnapshot {
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64", test))]
+    pub(crate) fn vcpu_event_wait_snapshot(&self, vcpu_id: usize) -> VcpuEventWaitSnapshot {
         VcpuEventWaitSnapshot {
+            vcpu_id,
             notification_generation: self.notification_generation(),
         }
     }
@@ -420,7 +422,7 @@ impl VmRuntimeHandle {
         self.notify_one();
     }
 
-    #[cfg(any(target_arch = "aarch64", test))]
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64", test))]
     pub(crate) fn device_poll_requested(&self) -> bool {
         self.device_poll_requested.load(Ordering::Acquire)
     }
@@ -517,10 +519,16 @@ impl VmRuntimeHandle {
     }
 }
 
-#[cfg(any(target_arch = "aarch64", test))]
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64", test))]
 impl VcpuEventWaitSnapshot {
     pub(crate) fn has_pending_event(&self, runtime: &VmRuntimeHandle) -> bool {
         runtime.device_poll_requested()
+            || runtime
+                .pending_interrupts
+                .lock()
+                .get(&self.vcpu_id)
+                .is_some_and(|interrupts| !interrupts.is_empty())
+            || runtime.irq_dispatcher().has_pending(self.vcpu_id)
             || runtime.notification_generation() != self.notification_generation
     }
 }
@@ -1850,7 +1858,10 @@ impl Drop for AxVM {
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, sync::atomic::AtomicBool};
+    use std::{
+        cell::{Cell, RefCell},
+        sync::atomic::AtomicBool,
+    };
 
     use axdevice_base::{
         ControllerInputId, InterruptControllerId, InterruptEndpoint, InterruptTriggerMode,
@@ -1971,6 +1982,37 @@ mod tests {
         .unwrap();
 
         assert_eq!(*events.borrow(), ["notify", "ipi"]);
+    }
+
+    #[cfg(feature = "host-test")]
+    #[test]
+    fn queued_interrupt_before_wait_snapshot_prevents_vcpu_sleep() {
+        let runtime = VmRuntimeHandle::new();
+        let interrupt = PendingVcpuInterrupt {
+            id: crate::irq::model::VirtualInterruptId(1),
+            trigger: crate::InterruptTriggerMode::LevelTriggered,
+        };
+        runtime.irq_dispatcher().register_test_vcpu(0, 3);
+        dispatch_vcpu_interrupt_with(
+            || runtime.irq_dispatcher().enqueue(0, interrupt),
+            || runtime.notify_all(),
+            |_| {},
+        )
+        .unwrap();
+
+        let wait_snapshot = runtime.vcpu_event_wait_snapshot(0);
+        let sleep_count = Cell::new(0);
+        wait_for_vcpu_event_if_idle(
+            &runtime,
+            &wait_snapshot,
+            || true,
+            |_| {
+                sleep_count.set(sleep_count.get() + 1);
+            },
+        );
+
+        assert_eq!(sleep_count.get(), 0);
+        assert_eq!(runtime.irq_dispatcher().drain(0), std::vec![interrupt]);
     }
 
     #[test]

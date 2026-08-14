@@ -1,3 +1,5 @@
+use crate::{BaseScheduler, CFScheduler, FifoScheduler, RRScheduler};
+
 macro_rules! def_test_sched {
     ($name:ident, $scheduler:ty, $task:ty) => {
         mod $name {
@@ -128,6 +130,13 @@ macro_rules! def_test_sched {
 def_test_sched!(fifo, FifoScheduler::<usize>, FifoTask::<usize>);
 def_test_sched!(rr, RRScheduler::<usize, 5>, RRTask::<usize, 5>);
 def_test_sched!(cfs, CFScheduler::<usize>, CFSTask::<usize>);
+
+#[test]
+fn only_preemptive_schedulers_require_periodic_ticks() {
+    assert!(!FifoScheduler::<usize>::REQUIRES_PERIODIC_TICK);
+    assert!(RRScheduler::<usize, 5>::REQUIRES_PERIODIC_TICK);
+    assert!(CFScheduler::<usize>::REQUIRES_PERIODIC_TICK);
+}
 
 #[test]
 fn rr_preempt_preserves_slice_but_forced_reschedule_rotates() {

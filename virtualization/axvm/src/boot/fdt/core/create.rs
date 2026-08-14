@@ -42,6 +42,12 @@ pub fn create_guest_fdt(
             is_machine_interrupt_provider(node).then(|| fdt.path_of(node_id))
         })
         .collect::<Vec<_>>();
+    let disabled_device_names = crate_config
+        .devices
+        .disabled
+        .iter()
+        .map(|device| device.path.as_str())
+        .collect::<Vec<_>>();
 
     let mut guest_tree = FdtTree::clone_filtered(fdt, |node_id, path, node| {
         should_keep_generated_node(
@@ -50,6 +56,7 @@ pub fn create_guest_fdt(
             path,
             node,
             passthrough_device_names,
+            &disabled_device_names,
             phys_cpu_ids,
             &machine_interrupt_providers,
         )
@@ -64,9 +71,17 @@ fn should_keep_generated_node(
     node_path: &str,
     node: &Node,
     passthrough_device_names: &[String],
+    disabled_device_names: &[&str],
     phys_cpu_ids: &[usize],
     machine_interrupt_providers: &[String],
 ) -> bool {
+    if disabled_device_names
+        .iter()
+        .any(|disabled| is_path_or_descendant(node_path, disabled))
+    {
+        return false;
+    }
+
     if node.name().starts_with("memory") {
         return false;
     }
@@ -120,6 +135,13 @@ fn is_path_or_ancestor(candidate: &str, path: &str) -> bool {
         || path
             .strip_prefix(candidate)
             .is_some_and(|suffix| candidate == "/" || suffix.starts_with('/'))
+}
+
+fn is_path_or_descendant(candidate: &str, path: &str) -> bool {
+    candidate == path
+        || candidate
+            .strip_prefix(path)
+            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 fn prune_dangling_interrupts_extended(source: &Fdt, guest: &mut FdtTree) -> AxVmResult {
@@ -343,6 +365,17 @@ pub(crate) fn patch_guest_fdt_for_runtime(
     initrd_start_size: Option<(u64, u64)>,
     create_chosen: bool,
 ) -> AxVmResult<Vec<u8>> {
+    let serial_interrupt_encoding = match (gic_profile.is_some(), plic_profile.is_some()) {
+        (true, false) => Some(crate::machine::GuestSerialFdtInterrupt::GicSpi),
+        (false, true) => Some(crate::machine::GuestSerialFdtInterrupt::PlicSource),
+        (false, false) => None,
+        (true, true) => {
+            return Err(ax_err_type!(
+                InvalidData,
+                "guest FDT cannot use GIC and PLIC serial interrupt encodings together"
+            ));
+        }
+    };
     let mut tree = FdtTree::from_bytes(fdt_bytes)?;
     let memory_specs = guest_memory_specs(memory_regions, crate_config);
     tree.rebuild_memory_nodes(&memory_specs)?;
@@ -362,9 +395,14 @@ pub(crate) fn patch_guest_fdt_for_runtime(
     install_configured_virtio_net(&mut tree, crate_config, gic_profile, plic_profile)?;
     install_configured_virtio_blk(&mut tree, crate_config, gic_profile, plic_profile)?;
     super::timer::install_machine_timer(&mut tree, timer_profile)?;
-    super::serial::install_machine_serial(&mut tree, serial_profile, serial_identity)?;
+    super::serial::install_machine_serial(
+        &mut tree,
+        serial_profile,
+        serial_identity,
+        serial_interrupt_encoding,
+    )?;
     for serial in additional_serials {
-        super::serial::install_additional_serial(&mut tree, *serial)?;
+        super::serial::install_additional_serial(&mut tree, *serial, serial_interrupt_encoding)?;
     }
     let bytes = tree.finish();
     Fdt::from_bytes(&bytes).map_err(|error| {
@@ -540,7 +578,9 @@ pub(crate) fn calculate_dtb_load_addr(vm: AxVMRef, fdt_size: usize) -> AxVmResul
 
 #[cfg(test)]
 mod tests {
-    use axvmconfig::{GuestConfig, VirtualDeviceRequest};
+    use axvmconfig::{
+        GuestConfig, GuestDevices, GuestType, PhysicalDeviceRef, VirtualDeviceRequest,
+    };
     use fdt_edit::{Fdt, Node, Property};
     use fdt_raw::RegInfo;
 
@@ -582,6 +622,108 @@ mod tests {
                 .unwrap()
                 .set_regs(&[RegInfo::new(reg as u64, None)]);
         }
+
+        fdt
+    }
+
+    fn qemu_riscv_passthrough_fdt() -> Fdt {
+        let mut fdt = test_fdt("cpu@0=0\ncpu@1=1\ncpu@2=2\ncpu@3=3");
+        for (cpu_path, phandle) in [
+            ("/cpus/cpu@0", 8),
+            ("/cpus/cpu@1", 6),
+            ("/cpus/cpu@2", 4),
+            ("/cpus/cpu@3", 2),
+        ] {
+            let cpu = fdt.get_by_path_id(cpu_path).unwrap();
+            let intc = fdt.add_node(cpu, Node::new("interrupt-controller"));
+            fdt.node_mut(intc)
+                .unwrap()
+                .set_property(prop_u32("#interrupt-cells", 1));
+            fdt.node_mut(intc)
+                .unwrap()
+                .set_property(Property::new("interrupt-controller", std::vec![]));
+            fdt.node_mut(intc)
+                .unwrap()
+                .set_property(super::super::tree::prop_string(
+                    "compatible",
+                    "riscv,cpu-intc",
+                ));
+            fdt.node_mut(intc)
+                .unwrap()
+                .set_property(prop_u32("phandle", phandle));
+        }
+
+        let root = fdt.root_id();
+        fdt.node_mut(root)
+            .unwrap()
+            .set_property(prop_u32("#address-cells", 2));
+        fdt.node_mut(root)
+            .unwrap()
+            .set_property(prop_u32("#size-cells", 2));
+        let soc = fdt.add_node(root, Node::new("soc"));
+        fdt.node_mut(soc)
+            .unwrap()
+            .set_property(prop_u32("#address-cells", 2));
+        fdt.node_mut(soc)
+            .unwrap()
+            .set_property(prop_u32("#size-cells", 2));
+
+        let serial = fdt.add_node(soc, Node::new("serial@10000000"));
+        fdt.node_mut(serial)
+            .unwrap()
+            .set_property(super::super::tree::prop_string("compatible", "ns16550a"));
+        fdt.view_typed_mut(serial)
+            .unwrap()
+            .set_regs(&[RegInfo::new(0x1000_0000, Some(0x100))]);
+        fdt.node_mut(serial)
+            .unwrap()
+            .set_property(prop_u32("interrupt-parent", 9));
+        fdt.node_mut(serial)
+            .unwrap()
+            .set_property(prop_u32("interrupts", 10));
+
+        let chosen = fdt.add_node(root, Node::new("chosen"));
+        fdt.node_mut(chosen)
+            .unwrap()
+            .set_property(super::super::tree::prop_string(
+                "stdout-path",
+                "/soc/serial@10000000:115200n8",
+            ));
+
+        let pci = fdt.add_node(soc, Node::new("pci@30000000"));
+        fdt.node_mut(pci)
+            .unwrap()
+            .set_property(super::super::tree::prop_string(
+                "compatible",
+                "pci-host-ecam-generic",
+            ));
+        fdt.view_typed_mut(pci)
+            .unwrap()
+            .set_regs(&[RegInfo::new(0x3000_0000, Some(0x1000_0000))]);
+        let endpoint = fdt.add_node(pci, Node::new("nvme@0,0"));
+        fdt.node_mut(endpoint)
+            .unwrap()
+            .set_property(super::super::tree::prop_string("compatible", "pci-nvme"));
+
+        let plic = fdt.add_node(soc, Node::new("plic@c000000"));
+        fdt.node_mut(plic)
+            .unwrap()
+            .set_property(super::super::tree::prop_string("compatible", "riscv,plic0"));
+        fdt.node_mut(plic)
+            .unwrap()
+            .set_property(Property::new("interrupt-controller", std::vec![]));
+        fdt.node_mut(plic)
+            .unwrap()
+            .set_property(prop_u32("#interrupt-cells", 1));
+        fdt.node_mut(plic)
+            .unwrap()
+            .set_property(prop_u32("phandle", 9));
+        fdt.view_typed_mut(plic)
+            .unwrap()
+            .set_regs(&[RegInfo::new(0x0c00_0000, Some(0x60_0000))]);
+        let mut contexts = Property::new("interrupts-extended", std::vec![]);
+        contexts.set_u32_ls(&[8, 11, 8, 9, 6, 11, 6, 9, 4, 11, 4, 9, 2, 11, 2, 9]);
+        fdt.node_mut(plic).unwrap().set_property(contexts);
 
         fdt
     }
@@ -806,48 +948,73 @@ mod tests {
     }
 
     #[test]
-    fn runtime_patch_can_leave_missing_chosen_for_host_copy() {
-        let fdt = Fdt::new();
+    fn runtime_patch_installs_console_without_inventing_bootargs_for_host_copy() {
+        let mut fdt = Fdt::new();
+        let root = fdt.root_id();
+        fdt.node_mut(root)
+            .unwrap()
+            .set_property(prop_u32("#address-cells", 2));
+        fdt.node_mut(root)
+            .unwrap()
+            .set_property(prop_u32("#size-cells", 2));
+        let soc = fdt.add_node(root, Node::new("soc"));
+        fdt.node_mut(soc)
+            .unwrap()
+            .set_property(prop_u32("#address-cells", 2));
+        fdt.node_mut(soc)
+            .unwrap()
+            .set_property(prop_u32("#size-cells", 2));
+        let plic = fdt.add_node(soc, Node::new("plic@c000000"));
+        fdt.node_mut(plic)
+            .unwrap()
+            .set_property(super::super::tree::prop_string("compatible", "riscv,plic0"));
+        fdt.node_mut(plic)
+            .unwrap()
+            .set_property(Property::new("interrupt-controller", std::vec![]));
         let dtb = fdt.encode().as_ref().to_vec();
         let cfg = GuestConfig::default();
 
-        let serial = crate::machine::current_machine_profile(1).serial;
+        let machine =
+            crate::machine::machine_profile_for(crate::machine::MachineArchitecture::Riscv64, 1);
         let patched = super::patch_guest_fdt_for_runtime(
             &dtb,
             &[],
             &cfg,
-            serial,
+            machine.serial,
             None,
             &[],
-            None,
-            None,
-            None,
+            machine.gic.as_ref(),
+            machine.plic.as_ref(),
+            machine.timer.as_ref(),
             None,
             false,
         )
         .unwrap();
         let reparsed = Fdt::from_bytes(&patched).unwrap();
 
-        assert!(reparsed.get_by_path_id("/chosen").is_none());
+        let chosen = reparsed.get_by_path("/chosen").unwrap();
+        assert!(chosen.as_node().get_property("stdout-path").is_some());
+        assert!(chosen.as_node().get_property("bootargs").is_none());
 
-        let serial = crate::machine::current_machine_profile(1).serial;
         let patched = super::patch_guest_fdt_for_runtime(
             &dtb,
             &[],
             &cfg,
-            serial,
+            machine.serial,
             None,
             &[],
-            None,
-            None,
-            None,
+            machine.gic.as_ref(),
+            machine.plic.as_ref(),
+            machine.timer.as_ref(),
             None,
             true,
         )
         .unwrap();
         let reparsed = Fdt::from_bytes(&patched).unwrap();
 
-        assert!(reparsed.get_by_path_id("/chosen").is_some());
+        let chosen = reparsed.get_by_path("/chosen").unwrap();
+        assert!(chosen.as_node().get_property("stdout-path").is_some());
+        assert!(chosen.as_node().get_property("bootargs").is_none());
     }
 
     #[test]
@@ -952,6 +1119,94 @@ mod tests {
                 .collect::<std::vec::Vec<_>>(),
             [8, 11, 8, 9]
         );
+    }
+
+    #[test]
+    fn disabled_passthrough_device_stays_absent_after_runtime_patch() {
+        let host = qemu_riscv_passthrough_fdt();
+        let host_dtb = host.encode().as_ref().to_vec();
+        let disabled_path = "/soc/pci@30000000";
+        let mut vm_cfg = AxVMConfig::new(AxVMConfigParams {
+            phys_cpu_ls: PhysCpuList::new(3, Some(std::vec![0, 1, 2]), None),
+            pass_through_devices: std::vec![HostDeviceAssignment {
+                name: "/".into(),
+                ..Default::default()
+            }],
+            excluded_devices: std::vec![std::vec![disabled_path.into()]],
+            address_space_policy: axvmconfig::AddressSpacePolicy::Passthrough,
+            ..Default::default()
+        });
+        let cfg = GuestConfig {
+            base: axvmconfig::VMBaseConfig {
+                guest_type: GuestType::Passthrough,
+                cpu_num: 3,
+                phys_cpu_ids: Some(std::vec![0, 1, 2]),
+                ..Default::default()
+            },
+            devices: GuestDevices {
+                disabled: std::vec![PhysicalDeviceRef {
+                    path: disabled_path.into(),
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let generated =
+            super::super::parser::setup_guest_fdt_from_vmm(&host_dtb, &mut vm_cfg, &cfg).unwrap();
+        let generated = Fdt::from_bytes(&generated).unwrap();
+        assert!(generated.get_by_path_id(disabled_path).is_none());
+        assert!(
+            generated
+                .get_by_path_id("/soc/pci@30000000/nvme@0,0")
+                .is_none()
+        );
+
+        let machine = crate::machine::machine_profile_for(
+            crate::machine::MachineArchitecture::Riscv64,
+            cfg.base.cpu_num,
+        );
+        let serial = super::super::serial::host_selected_serial(
+            &host,
+            machine.serial,
+            crate::machine::GuestSerialFdtInterrupt::PlicSource,
+        )
+        .unwrap()
+        .unwrap();
+        let serial_identity = match &serial.identity {
+            crate::machine::GuestSerialFirmwareIdentity::Fdt(identity) => identity,
+            crate::machine::GuestSerialFirmwareIdentity::Acpi(_) => {
+                panic!("RISC-V host FDT must resolve an FDT serial identity")
+            }
+        };
+        let patched = super::patch_guest_fdt_for_runtime(
+            generated.encode().as_ref(),
+            &[],
+            &cfg,
+            serial.profile,
+            Some(serial_identity),
+            &[],
+            None,
+            machine.plic.as_ref(),
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        let patched = Fdt::from_bytes(&patched).unwrap();
+
+        assert!(patched.get_by_path_id(disabled_path).is_none());
+        assert!(
+            patched
+                .get_by_path_id("/soc/pci@30000000/nvme@0,0")
+                .is_none()
+        );
+        assert!(patched.get_by_path_id("/cpus/cpu@0").is_some());
+        assert!(patched.get_by_path_id("/cpus/cpu@1").is_some());
+        assert!(patched.get_by_path_id("/cpus/cpu@2").is_some());
+        assert!(patched.get_by_path_id("/cpus/cpu@3").is_none());
+        assert!(patched.get_by_path_id("/soc/plic@c000000").is_some());
+        assert!(patched.get_by_path_id("/soc/serial@10000000").is_some());
     }
 
     #[test]

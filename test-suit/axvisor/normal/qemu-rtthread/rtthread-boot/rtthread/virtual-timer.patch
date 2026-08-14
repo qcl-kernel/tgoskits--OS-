@@ -1,0 +1,113 @@
+diff --git a/components/drivers/clock_time/clock_time_arm_arch.c b/components/drivers/clock_time/clock_time_arm_arch.c
+--- a/components/drivers/clock_time/clock_time_arm_arch.c
++++ b/components/drivers/clock_time/clock_time_arm_arch.c
+@@ -238,7 +238,7 @@ rt_uint64_t arm_arch_timer_get_count(void)
+ {
+     rt_uint64_t cntpct;
+
+-    rt_hw_sysreg_read(CNTPCT, cntpct);
++    rt_hw_sysreg_read(CNTVCT, cntpct);
+
+     return cntpct;
+ }
+@@ -280,7 +280,8 @@ static rt_err_t arm_arch_timer_probe(struct rt_platform_device *pdev)
+     irq_idx = 3;
+ #else
+-    mode_idx = 5;
+-    irq_idx = 1;
++    /* EL1 guests use the virtual counter and virtual timer PPI. */
++    mode_idx = 6;
++    irq_idx = 2;
+ #endif
+
+     arm_arch_timer_irq = rt_dm_dev_get_irq_by_name(&pdev->parent, irq_name[irq_idx]);
+
+diff --git a/libcpu/aarch64/common/cpu_gcc.S b/libcpu/aarch64/common/cpu_gcc.S
+--- a/libcpu/aarch64/common/cpu_gcc.S
++++ b/libcpu/aarch64/common/cpu_gcc.S
+@@ -93,29 +93,29 @@ rt_hw_set_process_id:
+ .globl rt_hw_gtimer_enable
+ rt_hw_gtimer_enable:
+     mov     x0, #1
+-    msr     CNTP_CTL_EL0, x0
++    msr     CNTV_CTL_EL0, x0
+     ret
+
+ /*
+- *set gtimer CNTP_TVAL_EL0 value
++ *set gtimer CNTV_TVAL_EL0 value
+  */
+ .globl rt_hw_set_gtimer_val
+ rt_hw_set_gtimer_val:
+-    msr     CNTP_TVAL_EL0, x0
++    msr     CNTV_TVAL_EL0, x0
+     ret
+
+ /*
+- *get gtimer CNTP_TVAL_EL0 value
++ *get gtimer CNTV_TVAL_EL0 value
+  */
+ .globl rt_hw_get_gtimer_val
+ rt_hw_get_gtimer_val:
+-    mrs     x0, CNTP_TVAL_EL0
++    mrs     x0, CNTV_TVAL_EL0
+     ret
+
+
+ .globl rt_hw_get_cntpct_val
+ rt_hw_get_cntpct_val:
+-    mrs     x0, CNTPCT_EL0
++    mrs     x0, CNTVCT_EL0
+     ret
+
+ /*
+diff --git a/libcpu/aarch64/common/gtimer.c b/libcpu/aarch64/common/gtimer.c
+--- a/libcpu/aarch64/common/gtimer.c
++++ b/libcpu/aarch64/common/gtimer.c
+@@ -16,7 +16,7 @@
+ #include <drivers/clock_time.h>
+ #endif
+
+-#define EL1_PHY_TIMER_IRQ_NUM 30
++#define EL1_VIRT_TIMER_IRQ_NUM 27
+
+ static volatile rt_uint64_t timer_step;
+
+@@ -29,7 +29,7 @@ static void rt_hw_timer_isr(int vector, void *parameter)
+
+ void rt_hw_gtimer_init(void)
+ {
+-    rt_hw_interrupt_install(EL1_PHY_TIMER_IRQ_NUM, rt_hw_timer_isr, RT_NULL, "tick");
++    rt_hw_interrupt_install(EL1_VIRT_TIMER_IRQ_NUM, rt_hw_timer_isr, RT_NULL, "tick");
+     rt_hw_isb();
+     timer_step = rt_hw_get_gtimer_frq();
+     rt_hw_dsb();
+@@ -41,7 +41,7 @@ void rt_hw_gtimer_local_enable(void)
+ {
+     rt_hw_gtimer_disable();
+     rt_hw_set_gtimer_val(timer_step);
+-    rt_hw_interrupt_umask(EL1_PHY_TIMER_IRQ_NUM);
++    rt_hw_interrupt_umask(EL1_VIRT_TIMER_IRQ_NUM);
+ #ifdef RT_USING_CLOCK_TIME
+     rt_clock_time_source_init();
+ #endif
+@@ -50,5 +50,5 @@ void rt_hw_gtimer_local_enable(void)
+ void rt_hw_gtimer_local_disable(void)
+ {
+     rt_hw_gtimer_disable();
+-    rt_hw_interrupt_mask(EL1_PHY_TIMER_IRQ_NUM);
++    rt_hw_interrupt_mask(EL1_VIRT_TIMER_IRQ_NUM);
+ }
+diff --git a/libcpu/aarch64/common/include/gtimer.h b/libcpu/aarch64/common/include/gtimer.h
+--- a/libcpu/aarch64/common/include/gtimer.h
++++ b/libcpu/aarch64/common/include/gtimer.h
+@@ -21,7 +21,7 @@ void rt_hw_gtimer_enable();
+
+ rt_inline void rt_hw_gtimer_disable(void)
+ {
+-    __asm__ volatile ("msr CNTP_CTL_EL0, xzr":::"memory");
++    __asm__ volatile ("msr CNTV_CTL_EL0, xzr":::"memory");
+ }
+
+ void rt_hw_set_gtimer_val(rt_uint64_t value);
+

@@ -22,6 +22,9 @@ pub trait BaseScheduler {
     /// Type of scheduled entities. Often a task struct.
     type SchedItem;
 
+    /// Whether this scheduler needs periodic timer ticks to make progress.
+    const REQUIRES_PERIODIC_TICK: bool;
+
     /// Initializes the scheduler.
     fn init(&mut self);
 

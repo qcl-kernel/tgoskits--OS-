@@ -46,12 +46,34 @@ impl HostCpuInterface {
 
 static HOST_CPU_INTERFACE: OnceLock<HostCpuInterface> = OnceLock::new();
 
-fn host_cpu_interface() -> Result<&'static HostCpuInterface, GicV3BackendError> {
+fn discover_or_cache_host_cpu_interface() -> Result<&'static HostCpuInterface, GicV3BackendError> {
     // Discovery is the only operation that takes the `rdrive` device lock.
     // The returned register capability is immutable, and every vCPU/IRQ hot
     // path below uses it directly so a hard IRQ cannot re-enter `rdrive` while
     // interrupted code already owns the same non-IRQ-safe device lock.
     HOST_CPU_INTERFACE.get_or_try_init(discover_host_cpu_interface)
+}
+
+fn cached_value<'a, T>(
+    cache: &'a OnceLock<T>,
+    operation: &'static str,
+) -> Result<&'a T, GicV3BackendError> {
+    cache.get().ok_or_else(|| {
+        GicV3BackendError::new(
+            operation,
+            "host CPU interface was not prepared before IRQ dispatch became visible",
+        )
+    })
+}
+
+fn cached_host_cpu_interface(
+    operation: &'static str,
+) -> Result<&'static HostCpuInterface, GicV3BackendError> {
+    cached_value(&HOST_CPU_INTERFACE, operation)
+}
+
+pub(super) fn prepare_host_cpu_interface() -> Result<(), GicV3BackendError> {
+    discover_or_cache_host_cpu_interface().map(|_| ())
 }
 
 fn discover_host_cpu_interface() -> Result<HostCpuInterface, GicV3BackendError> {
@@ -102,11 +124,11 @@ fn discover_host_cpu_interface() -> Result<HostCpuInterface, GicV3BackendError> 
 }
 
 pub(super) fn capabilities() -> Result<VgicBackendCapabilities, GicV3BackendError> {
-    host_cpu_interface().map(HostCpuInterface::capabilities)
+    discover_or_cache_host_cpu_interface().map(HostCpuInterface::capabilities)
 }
 
 pub(super) fn host_irq_config() -> Result<ArmHostIrqConfig, GicV3BackendError> {
-    host_cpu_interface().map(HostCpuInterface::irq_config)
+    discover_or_cache_host_cpu_interface().map(HostCpuInterface::irq_config)
 }
 
 pub(super) fn load(
@@ -139,7 +161,7 @@ fn checked_host_cpu_interface(
     capabilities: VgicBackendCapabilities,
     operation: &'static str,
 ) -> Result<&'static HostCpuInterface, GicV3BackendError> {
-    let host = host_cpu_interface()?;
+    let host = cached_host_cpu_interface(operation)?;
     let discovered = host.capabilities();
     if discovered != capabilities {
         return Err(GicV3BackendError::new(
@@ -215,7 +237,7 @@ fn save_v2(
 }
 
 pub(super) fn acknowledge_host_irq() -> Result<Option<usize>, GicV3BackendError> {
-    let host = host_cpu_interface()?;
+    let host = cached_host_cpu_interface("acknowledge host IRQ")?;
     let raw_ack = match host {
         HostCpuInterface::V2 { trap, .. } => u32::from(trap.ack()),
         HostCpuInterface::V3 { .. } => arm_gic_driver::v3::ack1().to_u32(),
@@ -224,7 +246,10 @@ pub(super) fn acknowledge_host_irq() -> Result<Option<usize>, GicV3BackendError>
 }
 
 pub(super) fn finish_pending_host_irq(raw_ack: u32) -> Result<Option<usize>, GicV3BackendError> {
-    Ok(finish_pending_host_irq_with(host_cpu_interface()?, raw_ack))
+    Ok(finish_pending_host_irq_with(
+        cached_host_cpu_interface("finish pending host IRQ")?,
+        raw_ack,
+    ))
 }
 
 fn finish_pending_host_irq_with(host: &HostCpuInterface, raw_ack: u32) -> Option<usize> {
@@ -257,7 +282,7 @@ fn finish_pending_host_irq_with(host: &HostCpuInterface, raw_ack: u32) -> Option
 
 pub(super) fn deactivate_host_irq(token: usize) -> Result<(), GicV3BackendError> {
     let raw = super::host_irq_intid(token);
-    match host_cpu_interface()? {
+    match cached_host_cpu_interface("deactivate host IRQ")? {
         HostCpuInterface::V2 { trap, .. } => {
             let intid = arm_gic_driver::checked_intid(raw, 1020).map_err(|_| {
                 GicV3BackendError::new(
@@ -293,13 +318,29 @@ pub(super) fn deactivate_host_irq(token: usize) -> Result<(), GicV3BackendError>
 }
 
 pub(super) fn deactivate_spi(intid: arm_gic_driver::IntId) -> Result<(), GicV3BackendError> {
-    match host_cpu_interface()? {
+    match cached_host_cpu_interface("deactivate host SPI")? {
         HostCpuInterface::V2 { trap, .. } => {
             trap.dir(arm_gic_driver::v2::Ack::Other(intid));
         }
         HostCpuInterface::V3 { .. } => arm_gic_driver::v3::dir(intid),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn irq_cache_lookup_never_initializes_or_waits() {
+        let cache = OnceLock::new();
+
+        assert!(cached_value::<usize>(&cache, "test IRQ lookup").is_err());
+        assert!(cache.get().is_none());
+
+        cache.set(37).unwrap();
+        assert_eq!(*cached_value(&cache, "test IRQ lookup").unwrap(), 37);
+    }
 }
 
 fn v2_vmcr(state: &CpuInterfaceState) -> u32 {

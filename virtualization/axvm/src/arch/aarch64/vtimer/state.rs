@@ -16,7 +16,7 @@ use ax_std::os::arceos::sync::IrqSafeMutex;
 use crate::{
     arch::aarch64::gic::AxvmVgicBackend,
     host::{HostCpu, HostTime, default_host},
-    timer::VmTimerHandle,
+    timer::{VmTimerHandle, VmTimerWake},
 };
 
 const NANOS_PER_SECOND: u128 = 1_000_000_000;
@@ -77,8 +77,12 @@ impl Aarch64TimerBinding {
         Ok(binding)
     }
 
-    /// Completes a banked PPI activation before this vCPU migrates to another pCPU.
-    pub(in crate::arch::aarch64) fn prepare_run(&self) -> VgicResult {
+    /// Completes a banked PPI activation before migration and restores the
+    /// emulated physical-timer wakeup canceled at the guest-entry boundary.
+    pub(in crate::arch::aarch64) fn prepare_run(
+        self: &Arc<Self>,
+        snapshot: ArmTimerSnapshot,
+    ) -> VgicResult {
         let current_cpu = default_host().this_cpu_id();
         let activation = {
             let mut active = self.host_activation.lock();
@@ -96,6 +100,15 @@ impl Aarch64TimerBinding {
                 *self.host_activation.lock() = Some(activation);
                 return Err(error);
             }
+        }
+
+        let now_counter = physical_counter();
+        if !snapshot.irq_asserted(ArmTimerKind::Physical, now_counter) {
+            self.schedule_deadline(
+                snapshot.deadline(ArmTimerKind::Physical, now_counter),
+                now_counter,
+                VmTimerWake::running_vcpu(),
+            );
         }
         Ok(())
     }
@@ -120,10 +133,22 @@ impl Aarch64TimerBinding {
     }
 
     /// Publishes the current timer output levels before VGIC state is saved.
-    pub(in crate::arch::aarch64) fn synchronize(&self, snapshot: ArmTimerSnapshot) -> VgicResult {
+    pub(in crate::arch::aarch64) fn synchronize(
+        self: &Arc<Self>,
+        snapshot: ArmTimerSnapshot,
+    ) -> VgicResult {
         self.invalidate_wait();
-        self.publish_levels(snapshot, physical_counter())
-            .map(|_| ())
+        let now_counter = physical_counter();
+        let physical_level = snapshot.irq_asserted(ArmTimerKind::Physical, now_counter);
+        self.publish_levels(snapshot, now_counter)?;
+        if !physical_level {
+            self.schedule_deadline(
+                snapshot.deadline(ArmTimerKind::Physical, now_counter),
+                now_counter,
+                VmTimerWake::running_vcpu(),
+            );
+        }
+        Ok(())
     }
 
     /// Re-evaluates both timers and arms the earliest wakeup for guest WFI.
@@ -136,8 +161,23 @@ impl Aarch64TimerBinding {
         if self.publish_levels(snapshot, now_counter)? {
             return Ok(());
         }
-        let Some(deadline_counter) = snapshot.earliest_deadline(now_counter) else {
-            return Ok(());
+        let deadline_counter = snapshot.earliest_deadline(now_counter);
+        self.schedule_deadline(
+            deadline_counter,
+            now_counter,
+            VmTimerWake::waiting_vcpu(self.vm_id, self.vcpu.raw()),
+        );
+        Ok(())
+    }
+
+    fn schedule_deadline(
+        self: &Arc<Self>,
+        deadline_counter: Option<u64>,
+        now_counter: u64,
+        wake: VmTimerWake,
+    ) {
+        let Some(deadline_counter) = deadline_counter else {
+            return;
         };
 
         let generation = self
@@ -146,8 +186,9 @@ impl Aarch64TimerBinding {
             .wrapping_add(1);
         let deadline_ns = host_deadline_ns(deadline_counter, now_counter, self.frequency);
         let binding = Arc::downgrade(self);
-        let handle = crate::timer::register_timer_handle(
+        let handle = crate::timer::register_timer_handle_with_dispatch(
             deadline_ns,
+            wake.dispatch(),
             Box::new(move |_| {
                 let Some(binding) = binding.upgrade() else {
                     return;
@@ -165,9 +206,7 @@ impl Aarch64TimerBinding {
                     return;
                 }
                 binding.scheduled.lock().take();
-                if let Err(error) =
-                    crate::runtime::vcpus::notify_vcpu(binding.vm_id, binding.vcpu.raw())
-                {
+                if let Err(error) = wake.notify() {
                     warn!(
                         "failed to wake VM[{}] vCPU {} for architectural timer: {error:?}",
                         binding.vm_id,
@@ -190,7 +229,6 @@ impl Aarch64TimerBinding {
         } else if let Some(previous) = previous {
             crate::timer::cancel_timer_handle(previous);
         }
-        Ok(())
     }
 
     /// Invalidates and remotely cancels any scheduled wait callback.

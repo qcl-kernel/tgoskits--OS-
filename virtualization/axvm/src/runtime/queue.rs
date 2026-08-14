@@ -62,6 +62,15 @@ impl VcpuInterruptQueue {
             .map(std::mem::take)
             .unwrap_or_default()
     }
+
+    /// Returns whether the given vCPU still has interrupts waiting to be drained.
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64", test))]
+    pub fn has_pending(&self, vcpu_id: usize) -> bool {
+        self.pending
+            .lock()
+            .get(&vcpu_id)
+            .is_some_and(|interrupts| !interrupts.is_empty())
+    }
 }
 
 #[cfg(all(test, feature = "host-test"))]
@@ -123,6 +132,18 @@ mod tests {
         q.push(0, edge(7));
         q.drain(0);
         assert!(q.drain(0).is_empty());
+    }
+
+    #[test]
+    fn pending_state_tracks_push_and_drain() {
+        let q = VcpuInterruptQueue::new();
+
+        assert!(!q.has_pending(0));
+        q.push(0, edge(7));
+        assert!(q.has_pending(0));
+        assert!(!q.has_pending(1));
+        q.drain(0);
+        assert!(!q.has_pending(0));
     }
 
     #[test]

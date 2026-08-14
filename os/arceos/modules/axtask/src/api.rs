@@ -187,6 +187,15 @@ pub fn on_timer_irq(scheduler_tick: bool) {
     }
 }
 
+/// Returns whether the configured scheduler or a registered periodic callback
+/// requires the host timer to keep producing periodic ticks.
+#[cfg(feature = "irq")]
+#[cfg_attr(doc, doc(cfg(feature = "irq")))]
+pub fn requires_periodic_timer_ticks() -> bool {
+    <Scheduler as ax_sched::BaseScheduler>::REQUIRES_PERIODIC_TICK
+        || crate::timers::has_periodic_callbacks()
+}
+
 #[cfg(feature = "irq")]
 #[doc(hidden)]
 pub fn next_timer_deadline_nanos() -> Option<u64> {
@@ -664,6 +673,18 @@ pub fn wake_task_by_id(_task_id: u64) -> bool {
 pub fn run_idle() -> ! {
     loop {
         yield_now_unchecked();
+        #[cfg(all(feature = "smp", not(feature = "preempt")))]
+        if crate::run_queue::take_local_deferred_wake_before_idle() {
+            continue;
+        }
+        #[cfg(all(
+            test,
+            feature = "host-test",
+            feature = "smp",
+            feature = "ipi",
+            not(feature = "preempt")
+        ))]
+        crate::run_queue::deferred_wake_test::pause_idle_after_yield();
         trace!("idle task: waiting for IRQs...");
         #[cfg(all(feature = "irq", not(feature = "host-test")))]
         ax_hal::asm::wait_for_irqs();

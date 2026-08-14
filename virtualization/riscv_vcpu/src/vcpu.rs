@@ -46,8 +46,8 @@ use crate::{
     trap::Exception,
     types::{
         RiscvAccessFlags, RiscvAccessWidth, RiscvGuestPhysAddr, RiscvGuestVirtAddr, RiscvIpiAbi,
-        RiscvIpiCompletion, RiscvIpiRequest, RiscvNestedPagingConfig, RiscvVcpuError,
-        RiscvVcpuResult, RiscvVmExit,
+        RiscvIpiCompletion, RiscvIpiRequest, RiscvNestedPagingConfig, RiscvTimerSnapshot,
+        RiscvVcpuError, RiscvVcpuResult, RiscvVmExit,
     },
     vpmu::VirtualPmu,
 };
@@ -60,6 +60,8 @@ const TINST_PSEUDO_STORE: u32 = 0x3020;
 const TINST_PSEUDO_LOAD: u32 = 0x3000;
 const EID_TIME: usize = 0x5449_4D45;
 const FID_SET_TIMER: usize = 0;
+#[cfg(feature = "sstc")]
+const S_TIMER_CODE: usize = 5;
 #[cfg(feature = "sstc")]
 const SYSTEM_OPCODE: u32 = 0x73;
 #[cfg(feature = "sstc")]
@@ -422,6 +424,22 @@ impl<H: RiscvHostOps> RiscvVcpu<H> {
         self.regs.virtual_hs_csrs.hvip |= hvip::read().bits();
     }
 
+    /// Returns the saved guest timer state after the vCPU has been unbound.
+    pub fn timer_snapshot(&self) -> Option<RiscvTimerSnapshot> {
+        #[cfg(feature = "sstc")]
+        {
+            Some(RiscvTimerSnapshot::new(
+                self.regs.vs_csrs.vstimecmp as u64,
+                self.regs.vs_csrs.htimedelta as u64,
+                self.regs.vs_csrs.vsie & (1 << S_TIMER_CODE) != 0,
+            ))
+        }
+        #[cfg(not(feature = "sstc"))]
+        {
+            None
+        }
+    }
+
     /// Attempts to decode the current guest-page-fault trap as an MMIO access.
     pub fn decode_mmio_fault(
         &mut self,
@@ -443,17 +461,43 @@ impl<H: RiscvHostOps> RiscvVcpu<H> {
         {
             self.regs.vs_csrs.vstimecmp = deadline;
         }
+        #[cfg(not(feature = "sstc"))]
         sbi_rt::set_timer(deadline as u64);
         self.set_virtual_interrupt_pending(S_TIMER, false)?;
+
+        // `stimecmp` and STIE belong to the host scheduler's shared timer
+        // arbiter. The guest deadline is represented by `vstimecmp`; changing
+        // the host comparator here can discard an AxVM or scheduler deadline.
+        #[cfg(feature = "sstc")]
+        if self.bound {
+            unsafe {
+                vstimecmp::write(deadline);
+            }
+        }
+        #[cfg(not(feature = "sstc"))]
         unsafe {
-            // The guest has consumed the current VS timer event and programmed
-            // a new deadline, so clear the injected VS timer pending bit and
-            // re-arm HS timer delivery for the next expiration.
-            #[cfg(feature = "sstc")]
-            vstimecmp::write(deadline);
             sie::set_stimer();
         }
         Ok(())
+    }
+
+    #[inline]
+    fn handle_supervisor_timer_interrupt(&mut self) -> RiscvVcpuResult<RiscvVmExit> {
+        #[cfg(feature = "sstc")]
+        {
+            // With Sstc, `vstimecmp` raises VSTIP independently. STIP remains
+            // the host scheduler's hardware timer interrupt.
+            Ok(RiscvVmExit::ExternalInterrupt {
+                vector: S_TIMER as u64,
+            })
+        }
+        #[cfg(not(feature = "sstc"))]
+        {
+            // Legacy platforms still use the HS timer as the emulation source.
+            self.inject_interrupt(S_TIMER)?;
+            unsafe { sie::clear_stimer() };
+            Ok(RiscvVmExit::Nothing)
+        }
     }
 
     /// Gets one of the vCPU's general purpose registers.
@@ -663,11 +707,7 @@ impl<H: RiscvHostOps> RiscvVcpu<H> {
                             return Ok(RiscvVmExit::CpuDown { state: 0 });
                         }
                         hsm::HART_SUSPEND => {
-                            // These parameters are reserved for a future suspend-state model.
-                            let _suspend_type = a[0];
-                            let _resume_addr = a[1];
-                            let _opaque = a[2];
-                            return Ok(RiscvVmExit::Halt);
+                            return Ok(self.handle_hart_suspend(a[0], a[1], a[2]));
                         }
                         _ => {
                             self.sbi_return(RET_ERR_NOT_SUPPORTED, 0);
@@ -820,14 +860,7 @@ impl<H: RiscvHostOps> RiscvVcpu<H> {
                 Ok(RiscvVmExit::Nothing)
             }
             Trap::Exception(Exception::VirtualInstruction) => self.handle_virtual_instruction(),
-            Trap::Interrupt(Interrupt::SupervisorTimer) => {
-                // Forward the elapsed timer to VS and stop taking the same HS
-                // timer interrupt repeatedly until software programs a new one.
-                self.inject_interrupt(S_TIMER)?;
-                unsafe { sie::clear_stimer() };
-
-                Ok(RiscvVmExit::Nothing)
-            }
+            Trap::Interrupt(Interrupt::SupervisorTimer) => self.handle_supervisor_timer_interrupt(),
             Trap::Interrupt(Interrupt::SupervisorSoft) => {
                 // Host IPIs and scheduler wakeups use SSIP. Route them through
                 // the host IRQ path so it can acknowledge SSIP before the vCPU
@@ -903,6 +936,18 @@ impl<H: RiscvHostOps> RiscvVcpu<H> {
 
         self.advance_pc(4);
         Ok(RiscvVmExit::SendIpi(request))
+    }
+
+    fn handle_hart_suspend(
+        &mut self,
+        suspend_type: usize,
+        resume_addr: usize,
+        opaque: usize,
+    ) -> RiscvVmExit {
+        // These parameters are reserved for a future suspend-state model.
+        let _ = (suspend_type, resume_addr, opaque);
+        self.sbi_return(RET_SUCCESS, 0);
+        RiscvVmExit::Halt
     }
 
     #[cfg(feature = "sstc")]
@@ -1284,5 +1329,67 @@ mod tests {
             assert_eq!(vcpu.get_gpr(GprIndex::A0), expected.error);
             assert_eq!(vcpu.get_gpr(GprIndex::A1), expected.value);
         }
+    }
+
+    #[test]
+    fn hart_suspend_completes_the_ecall_before_waiting_for_wakeup() {
+        let mut vcpu = RiscvVcpu::<TestHost>::default();
+        vcpu.regs.guest_regs.sepc = 0x1000;
+        vcpu.set_gpr_from_gpr_index(GprIndex::A0, usize::MAX);
+        vcpu.set_gpr_from_gpr_index(GprIndex::A1, usize::MAX);
+
+        assert!(matches!(
+            vcpu.handle_hart_suspend(0, 0, 0),
+            RiscvVmExit::Halt
+        ));
+        assert_eq!(vcpu.regs.guest_regs.sepc, 0x1004);
+        assert_eq!(vcpu.get_gpr(GprIndex::A0), RET_SUCCESS);
+        assert_eq!(vcpu.get_gpr(GprIndex::A1), 0);
+    }
+
+    #[cfg(feature = "sstc")]
+    #[test]
+    fn timer_snapshot_converts_enabled_guest_compare_to_host_ticks() {
+        let mut vcpu = RiscvVcpu::<TestHost>::default();
+        vcpu.regs.vs_csrs.vstimecmp = 1_250;
+        vcpu.regs.vs_csrs.htimedelta = 250;
+        vcpu.regs.vs_csrs.vsie = 1 << S_TIMER_CODE;
+
+        assert_eq!(
+            vcpu.timer_snapshot().unwrap().host_deadline_ticks(),
+            Some(1_000)
+        );
+
+        vcpu.regs.vs_csrs.vsie = 0;
+        assert_eq!(vcpu.timer_snapshot().unwrap().host_deadline_ticks(), None);
+
+        vcpu.regs.vs_csrs.vsie = 1 << S_TIMER_CODE;
+        vcpu.regs.vs_csrs.vstimecmp = usize::MAX;
+        assert_eq!(vcpu.timer_snapshot().unwrap().host_deadline_ticks(), None);
+    }
+
+    #[cfg(feature = "sstc")]
+    #[test]
+    fn guest_timer_programming_updates_only_virtual_timer_state() {
+        let mut vcpu = RiscvVcpu::<TestHost>::default();
+        let mut pending = hvip::Hvip::from_bits(0);
+        pending.set_vstip(true);
+        vcpu.regs.virtual_hs_csrs.hvip = pending.bits();
+
+        vcpu.program_guest_timer(0x1234_5678).unwrap();
+
+        assert_eq!(vcpu.regs.vs_csrs.vstimecmp, 0x1234_5678);
+        assert!(!hvip::Hvip::from_bits(vcpu.regs.virtual_hs_csrs.hvip).vstip());
+    }
+
+    #[cfg(feature = "sstc")]
+    #[test]
+    fn supervisor_timer_exit_is_returned_to_the_host_irq_path() {
+        let mut vcpu = RiscvVcpu::<TestHost>::default();
+
+        assert!(matches!(
+            vcpu.handle_supervisor_timer_interrupt().unwrap(),
+            RiscvVmExit::ExternalInterrupt { vector } if vector == S_TIMER as u64
+        ));
     }
 }

@@ -154,6 +154,34 @@ impl WaitQueue {
     where
         F: Fn() -> bool,
     {
+        self.wait_timeout_until_with(dur, condition, true)
+    }
+
+    /// Waits for a background maintenance retry without preempting the current
+    /// foreground task when the timeout expires.
+    #[cfg(feature = "irq")]
+    pub(crate) fn wait_background_timeout_until<F>(
+        &self,
+        dur: core::time::Duration,
+        condition: F,
+    ) -> bool
+    where
+        F: Fn() -> bool,
+    {
+        self.wait_timeout_until_with(dur, condition, false)
+    }
+
+    #[cfg(feature = "irq")]
+    #[track_caller]
+    fn wait_timeout_until_with<F>(
+        &self,
+        dur: core::time::Duration,
+        condition: F,
+        timeout_resched: bool,
+    ) -> bool
+    where
+        F: Fn() -> bool,
+    {
         crate::api::might_sleep();
         let curr = crate::current();
         let deadline = ax_hal::time::monotonic_time() + dur;
@@ -174,7 +202,11 @@ impl WaitQueue {
                 break;
             }
 
-            crate::timers::set_alarm_wakeup(deadline, curr.clone());
+            if timeout_resched {
+                crate::timers::set_alarm_wakeup(deadline, curr.clone());
+            } else {
+                crate::timers::set_background_alarm_wakeup(deadline, curr.clone());
+            }
             rq.blocked_resched(wq);
             // Preemption may occur here.
         }

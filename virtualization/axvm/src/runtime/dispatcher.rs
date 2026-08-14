@@ -135,4 +135,10 @@ impl VcpuIrqDispatcher {
     pub fn drain(&self, vcpu_id: usize) -> Vec<PendingVcpuInterrupt> {
         self.queue.drain(vcpu_id)
     }
+
+    /// Returns whether the target vCPU has interrupts queued for its next run.
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64", test))]
+    pub fn has_pending(&self, vcpu_id: usize) -> bool {
+        self.queue.has_pending(vcpu_id)
+    }
 }

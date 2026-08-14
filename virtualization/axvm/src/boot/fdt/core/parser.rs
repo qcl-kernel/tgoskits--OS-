@@ -449,9 +449,11 @@ pub fn set_phys_cpu_sets(
     info!("Found {} host CPU nodes", cpu_nodes_info.len());
 
     let policy = super::selected_guest_fdt_policy();
-    let (new_phys_cpu_sets, guest_phys_cpu_ids) = resolve_phys_cpu_sets(
+    let (new_phys_cpu_sets, guest_phys_cpu_ids) = resolve_guest_cpu_placement(
         phys_cpu_ids,
         &cpu_nodes_info,
+        crate_config.base.phys_cpu_sets.as_deref(),
+        crate_config.base.cpu_num,
         (policy.host_cpu_count)(),
         policy.resolve_cpu_index,
     )?;
@@ -460,6 +462,69 @@ pub fn set_phys_cpu_sets(
     phys_cpu_ls.set_guest_cpu_sets(new_phys_cpu_sets);
     phys_cpu_ls.set_guest_phys_cpu_ids(guest_phys_cpu_ids);
     Ok(())
+}
+
+fn resolve_guest_cpu_placement(
+    phys_cpu_ids: &[usize],
+    cpu_nodes: &[(usize, usize)],
+    configured_cpu_sets: Option<&[usize]>,
+    cpu_num: usize,
+    host_cpu_count: usize,
+    resolve_cpu_index: impl FnMut(usize) -> Option<usize>,
+) -> AxVmResult<(Vec<usize>, Vec<usize>)> {
+    let (resolved_cpu_sets, guest_phys_cpu_ids) =
+        resolve_phys_cpu_sets(phys_cpu_ids, cpu_nodes, host_cpu_count, resolve_cpu_index)?;
+    let cpu_sets = select_phys_cpu_sets(
+        configured_cpu_sets,
+        resolved_cpu_sets,
+        cpu_num,
+        host_cpu_count,
+    )?;
+    Ok((cpu_sets, guest_phys_cpu_ids))
+}
+
+fn select_phys_cpu_sets(
+    configured: Option<&[usize]>,
+    resolved: Vec<usize>,
+    cpu_num: usize,
+    host_cpu_count: usize,
+) -> AxVmResult<Vec<usize>> {
+    let Some(configured) = configured else {
+        return Ok(resolved);
+    };
+    if configured.len() != cpu_num {
+        return Err(ax_err_type!(
+            InvalidInput,
+            format!(
+                "phys_cpu_sets contains {} masks for {cpu_num} vCPUs",
+                configured.len()
+            )
+        ));
+    }
+
+    let usable_mask = if host_cpu_count >= usize::BITS as usize {
+        usize::MAX
+    } else {
+        (1usize << host_cpu_count).wrapping_sub(1)
+    };
+    for (vcpu_id, &mask) in configured.iter().enumerate() {
+        if mask == 0 {
+            return Err(ax_err_type!(
+                InvalidInput,
+                format!("phys_cpu_sets[{vcpu_id}] must select at least one host CPU")
+            ));
+        }
+        if mask & !usable_mask != 0 {
+            return Err(ax_err_type!(
+                InvalidInput,
+                format!(
+                    "phys_cpu_sets[{vcpu_id}] mask {mask:#x} selects a CPU outside the \
+                     {host_cpu_count} usable host CPUs"
+                )
+            ));
+        }
+    }
+    Ok(configured.to_vec())
 }
 
 fn resolve_phys_cpu_sets(
@@ -717,7 +782,8 @@ mod tests {
 
     use super::{
         align_reserved_region_4k, parse_passthrough_devices_address, parse_vm_interrupt,
-        reserve_excluded_device_ranges, resolve_phys_cpu_sets,
+        reserve_excluded_device_ranges, resolve_guest_cpu_placement, resolve_phys_cpu_sets,
+        select_phys_cpu_sets,
     };
     use crate::config::{AxVMConfig, AxVMConfigParams, PhysCpuList};
 
@@ -900,6 +966,55 @@ mod tests {
 
         assert_eq!(cpu_sets, vec![0b0010]);
         assert_eq!(guest_cpu_ids, vec![0]);
+    }
+
+    #[test]
+    fn explicit_phys_cpu_sets_survive_fdt_hart_id_resolution() {
+        let cpu_nodes = [(0, 0), (1, 1), (2, 2), (3, 3)];
+        let explicit_sets = vec![0b0010, 0b0100, 0b1000];
+        let (cpu_sets, guest_cpu_ids) = resolve_guest_cpu_placement(
+            &[0, 1, 2],
+            &cpu_nodes,
+            Some(&explicit_sets),
+            3,
+            4,
+            |hardware_cpu_id| Some(hardware_cpu_id),
+        )
+        .unwrap();
+
+        assert_eq!(cpu_sets, explicit_sets);
+        assert_eq!(guest_cpu_ids, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn explicit_phys_cpu_sets_reject_invalid_vcpu_coverage() {
+        let count_error =
+            select_phys_cpu_sets(Some(&[0b0010, 0b0100]), vec![1, 2, 4], 3, 4).unwrap_err();
+        assert!(
+            count_error
+                .to_string()
+                .contains("contains 2 masks for 3 vCPUs")
+        );
+
+        let empty_error =
+            select_phys_cpu_sets(Some(&[0b0010, 0, 0b1000]), vec![1, 2, 4], 3, 4).unwrap_err();
+        assert!(
+            empty_error
+                .to_string()
+                .contains("must select at least one host CPU")
+        );
+
+        let range_error =
+            select_phys_cpu_sets(Some(&[0b0010, 0b0100, 0b1_0000]), vec![1, 2, 4], 3, 4)
+                .unwrap_err();
+        assert!(
+            matches!(
+                range_error,
+                crate::AxVmError::InvalidInput { ref detail, .. }
+                    if detail.contains("outside the 4 usable host CPUs")
+            ),
+            "unexpected range error: {range_error:?}"
+        );
     }
 
     #[test]

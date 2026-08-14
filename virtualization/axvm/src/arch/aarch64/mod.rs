@@ -67,6 +67,11 @@ impl ArchOps for Aarch64Arch {
         );
     }
 
+    fn prepare_host_irq_dispatch() -> AxVmResult {
+        gic::prepare_host_cpu_interface()
+            .map_err(|error| crate::AxVmError::interrupt("prepare host IRQ CPU interface", error))
+    }
+
     fn activate_devices(vm: &crate::AxVM) -> AxVmResult {
         vgic_runtime(vm)?.activate()
     }
@@ -222,14 +227,17 @@ impl ArchOps for Aarch64Arch {
     ) -> AxVmResult<VcpuRunAction> {
         match work {
             Aarch64DeferredRunWork::ExternalInterrupt { token } => {
-                if let Some(token) = token {
-                    if !vcpu.get_arch_vcpu().accept_host_timer_irq(token) {
+                crate::host::arceos::with_acknowledged_host_irq_entry(|| -> AxVmResult {
+                    if let Some(token) = token
+                        && !vcpu.get_arch_vcpu().accept_host_timer_irq(token)
+                    {
                         gic::route_acknowledged_host_irq(token).map_err(|error| {
                             crate::AxVmError::interrupt("route acknowledged host IRQ", error)
                         })?;
                     }
-                }
-                crate::check_timer_events();
+                    crate::check_timer_events();
+                    Ok(())
+                })?;
             }
         }
         Ok(VcpuRunAction {
@@ -245,7 +253,7 @@ impl ArchOps for Aarch64Arch {
         vcpu: &crate::vm::AxVCpuRef<Self::VCpu>,
         runtime: &crate::vm::VmRuntimeHandle,
     ) {
-        let wait_snapshot = runtime.vcpu_event_wait_snapshot();
+        let wait_snapshot = runtime.vcpu_event_wait_snapshot(vcpu.id());
         if !vm.running() {
             return;
         }
@@ -313,12 +321,14 @@ impl ArmHostOps for AxvmArmHostOps {
     }
 
     fn handle_current_host_irq() {
-        if let Some(token) = gic::acknowledge_host_irq()
-            && let Err(error) = gic::route_acknowledged_host_irq(token)
-        {
-            warn!("{error}");
-        }
-        crate::check_timer_events();
+        crate::host::arceos::with_acknowledged_host_irq_entry(|| {
+            if let Some(token) = gic::acknowledge_host_irq()
+                && let Err(error) = gic::route_acknowledged_host_irq(token)
+            {
+                warn!("{error}");
+            }
+            crate::check_timer_events();
+        });
     }
 }
 
@@ -437,12 +447,18 @@ impl AxvmArmVcpu {
 
     fn prepare_timer_run(&self) -> AxVmResult {
         self.invalidate_virtual_timer_wait();
+        let snapshot = self.inner.timer_snapshot().map_err(|error| {
+            crate::AxVmError::vcpu(
+                "snapshot AArch64 timers before guest entry",
+                std::format!("{error:?}"),
+            )
+        })?;
         self.timer_binding
             .as_ref()
             .ok_or_else(|| {
                 crate::AxVmError::resource_unavailable("AArch64 timer binding", "missing")
             })?
-            .prepare_run()
+            .prepare_run(snapshot)
             .map_err(|error| crate::AxVmError::interrupt("prepare timer PPI route", error))
     }
 

@@ -96,6 +96,10 @@ pub(crate) fn dispatch_host_irq(vector: usize) {
     modules::ax_hal::irq::handle_irq(vector);
 }
 
+pub(crate) fn with_acknowledged_host_irq_entry<T>(dispatch: impl FnOnce() -> T) -> T {
+    modules::ax_hal::irq::with_acknowledged_irq_entry(dispatch)
+}
+
 pub(crate) fn set_console_input_irq_enabled(enabled: bool) {
     modules::ax_hal::console::set_input_irq_enabled(enabled);
 }
@@ -336,6 +340,10 @@ impl HostPlatform for ArceOsHost {
     }
 
     fn enable_virtualization_on_current_cpu(&self) -> AxVmResult {
+        // This runs in ordinary task context, before the architecture may
+        // publish a new current-EL vector and re-enable local interrupts.
+        // AArch64 uses it to keep blocking discovery out of the hard-IRQ path.
+        CurrentArch::prepare_host_irq_dispatch()?;
         crate::timer::init_percpu();
         crate::percpu::init_current_cpu()?;
         crate::percpu::enable_current_cpu()?;

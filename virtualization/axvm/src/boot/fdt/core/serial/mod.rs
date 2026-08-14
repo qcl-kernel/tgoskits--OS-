@@ -21,12 +21,12 @@ pub(crate) fn install_machine_serial(
     tree: &mut FdtTree,
     profile: GuestSerialProfile,
     identity: Option<&GuestSerialFdtIdentity>,
+    interrupt_encoding: Option<GuestSerialFdtInterrupt>,
 ) -> AxVmResult {
-    let machine = crate::machine::current_machine_profile(1);
     let GuestSerialTransport::Mmio { .. } = profile.transport else {
         return Ok(());
     };
-    let Some(interrupt_encoding) = machine.serial_fdt_interrupt else {
+    let Some(interrupt_encoding) = interrupt_encoding else {
         return Ok(());
     };
     install_mmio_serial(tree, profile, interrupt_encoding, identity, true)
@@ -36,12 +36,12 @@ pub(crate) fn install_machine_serial(
 pub(crate) fn install_additional_serial(
     tree: &mut FdtTree,
     profile: GuestSerialProfile,
+    interrupt_encoding: Option<GuestSerialFdtInterrupt>,
 ) -> AxVmResult {
-    let machine = crate::machine::current_machine_profile(1);
     let GuestSerialTransport::Mmio { .. } = profile.transport else {
         return Ok(());
     };
-    let Some(interrupt_encoding) = machine.serial_fdt_interrupt else {
+    let Some(interrupt_encoding) = interrupt_encoding else {
         return Ok(());
     };
     install_mmio_serial(tree, profile, interrupt_encoding, None, false)

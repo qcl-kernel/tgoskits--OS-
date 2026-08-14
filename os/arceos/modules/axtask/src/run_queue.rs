@@ -8,11 +8,14 @@ use ax_lazyinit::LazyInit;
 use ax_memory_addr::VirtAddr;
 use ax_sched::BaseScheduler;
 
-#[cfg(all(
-    feature = "smp",
-    feature = "ipi",
-    feature = "preempt",
-    not(feature = "host-test")
+#[cfg(any(
+    all(
+        feature = "smp",
+        feature = "ipi",
+        feature = "preempt",
+        not(feature = "host-test")
+    ),
+    all(feature = "irq", not(feature = "preempt"))
 ))]
 use crate::sync::RawState;
 use crate::{
@@ -21,6 +24,247 @@ use crate::{
     task::{CurrentTask, TASK_STACK_ALIGN, TaskStack, TaskState},
     wait_queue::WaitQueueGuard,
 };
+
+#[cfg(all(
+    test,
+    feature = "host-test",
+    feature = "smp",
+    feature = "ipi",
+    not(feature = "preempt")
+))]
+pub(crate) mod deferred_wake_test {
+    use core::{
+        ptr,
+        sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering},
+    };
+
+    use crate::WaitQueue;
+
+    static REMOTE_WAKER_TASK_ID: AtomicU64 = AtomicU64::new(0);
+    static BLOCK_REACHED: AtomicBool = AtomicBool::new(false);
+    static BLOCK_RELEASED: AtomicBool = AtomicBool::new(false);
+    static IDLE_HOOK_ARMED: AtomicBool = AtomicBool::new(false);
+    static IDLE_REACHED: AtomicBool = AtomicBool::new(false);
+    static IDLE_RELEASED: AtomicBool = AtomicBool::new(false);
+    static LOCAL_IRQ_WAIT: AtomicPtr<WaitQueue> = AtomicPtr::new(ptr::null_mut());
+    static LOCAL_IRQ_WORKER_RAN: AtomicPtr<AtomicBool> = AtomicPtr::new(ptr::null_mut());
+    static LOCAL_IRQ_PARENT_WAIT: AtomicPtr<WaitQueue> = AtomicPtr::new(ptr::null_mut());
+    static HANDLE_RESCHEDULE_IPI: AtomicBool = AtomicBool::new(false);
+    static REMOTE_ENQUEUE_ACTIVE: AtomicBool = AtomicBool::new(false);
+    static IRQ_HANDLER_ACTIVE: AtomicBool = AtomicBool::new(false);
+    static LOCAL_IRQ_RAN_BEFORE_WAIT: AtomicBool = AtomicBool::new(false);
+
+    pub(crate) fn arm_idle_only() {
+        REMOTE_WAKER_TASK_ID.store(0, Ordering::Release);
+        BLOCK_REACHED.store(false, Ordering::Release);
+        BLOCK_RELEASED.store(false, Ordering::Release);
+        IDLE_REACHED.store(false, Ordering::Release);
+        IDLE_RELEASED.store(false, Ordering::Release);
+        IDLE_HOOK_ARMED.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn arm(task_id: u64) {
+        assert_ne!(task_id, 0);
+        BLOCK_REACHED.store(false, Ordering::Release);
+        BLOCK_RELEASED.store(false, Ordering::Release);
+        IDLE_REACHED.store(false, Ordering::Release);
+        IDLE_RELEASED.store(false, Ordering::Release);
+        IDLE_HOOK_ARMED.store(true, Ordering::Release);
+        REMOTE_WAKER_TASK_ID.store(task_id, Ordering::Release);
+    }
+
+    pub(crate) fn arm_local_irq(
+        wait: &WaitQueue,
+        worker_ran: &AtomicBool,
+        parent_wait: &WaitQueue,
+    ) {
+        arm_irq_wake(0, wait, worker_ran, parent_wait, false);
+    }
+
+    pub(crate) fn arm_remote_ipi(
+        wait: &WaitQueue,
+        worker_ran: &AtomicBool,
+        parent_wait: &WaitQueue,
+    ) {
+        arm_irq_wake(0, wait, worker_ran, parent_wait, true);
+    }
+
+    fn arm_irq_wake(
+        remote_task_id: u64,
+        wait: &WaitQueue,
+        worker_ran: &AtomicBool,
+        parent_wait: &WaitQueue,
+        handle_reschedule_ipi: bool,
+    ) {
+        REMOTE_WAKER_TASK_ID.store(remote_task_id, Ordering::Release);
+        BLOCK_REACHED.store(false, Ordering::Release);
+        BLOCK_RELEASED.store(false, Ordering::Release);
+        IDLE_REACHED.store(false, Ordering::Release);
+        IDLE_RELEASED.store(false, Ordering::Release);
+        LOCAL_IRQ_RAN_BEFORE_WAIT.store(false, Ordering::Release);
+        LOCAL_IRQ_WORKER_RAN.store(ptr::from_ref(worker_ran).cast_mut(), Ordering::Release);
+        LOCAL_IRQ_WAIT.store(ptr::from_ref(wait).cast_mut(), Ordering::Release);
+        LOCAL_IRQ_PARENT_WAIT.store(ptr::from_ref(parent_wait).cast_mut(), Ordering::Release);
+        HANDLE_RESCHEDULE_IPI.store(handle_reschedule_ipi, Ordering::Release);
+        REMOTE_ENQUEUE_ACTIVE.store(handle_reschedule_ipi, Ordering::Release);
+        IDLE_HOOK_ARMED.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn models_remote_waker(task_id: u64) -> bool {
+        REMOTE_WAKER_TASK_ID.load(Ordering::Acquire) == task_id
+    }
+
+    pub(crate) fn has_remote_waker() -> bool {
+        REMOTE_WAKER_TASK_ID.load(Ordering::Acquire) != 0
+            || REMOTE_ENQUEUE_ACTIVE.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn irq_handler_active() -> bool {
+        IRQ_HANDLER_ACTIVE.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn pause_after_block(task_id: u64) {
+        if !models_remote_waker(task_id) {
+            return;
+        }
+        BLOCK_REACHED.store(true, Ordering::Release);
+        while !BLOCK_RELEASED.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+    }
+
+    pub(crate) fn block_reached() -> bool {
+        BLOCK_REACHED.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn release_block() {
+        BLOCK_RELEASED.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn pause_idle_after_yield() {
+        if !IDLE_HOOK_ARMED.load(Ordering::Acquire) {
+            return;
+        }
+        let wait = LOCAL_IRQ_WAIT.swap(ptr::null_mut(), Ordering::AcqRel);
+        let injected_local_irq = !wait.is_null();
+        if !wait.is_null() {
+            // SAFETY: `arm_local_irq` publishes references owned by the test,
+            // which keeps both Arcs alive until `finish` clears this hook.
+            IRQ_HANDLER_ACTIVE.store(true, Ordering::Release);
+            assert!(unsafe { &*wait }.notify_one_from_irq());
+            if HANDLE_RESCHEDULE_IPI.swap(false, Ordering::AcqRel) {
+                REMOTE_ENQUEUE_ACTIVE.store(false, Ordering::Release);
+                super::REMOTE_RESCHEDULE_PENDING.store(true, Ordering::Release);
+                super::handle_ipi_reschedule();
+            }
+            let worker_ran = LOCAL_IRQ_WORKER_RAN.load(Ordering::Acquire);
+            assert!(!worker_ran.is_null());
+            // A hard-IRQ action may only publish runnable work. Switching here
+            // would suspend a live exception frame before controller completion.
+            assert!(
+                !unsafe { &*worker_ran }.load(Ordering::Acquire),
+                "an IRQ wake must not switch tasks before IRQ dispatch returns",
+            );
+            IRQ_HANDLER_ACTIVE.store(false, Ordering::Release);
+            super::handle_irq_exit();
+            // SAFETY: the paired worker flag has the same lifetime guarantee
+            // as the wait queue above.
+            LOCAL_IRQ_RAN_BEFORE_WAIT.store(
+                unsafe { &*worker_ran }.load(Ordering::Acquire),
+                Ordering::Release,
+            );
+        }
+        IDLE_REACHED.store(true, Ordering::Release);
+        if injected_local_irq {
+            let parent_wait = LOCAL_IRQ_PARENT_WAIT.swap(ptr::null_mut(), Ordering::AcqRel);
+            assert!(!parent_wait.is_null());
+            // SAFETY: the parent wait queue is owned by the same test fixture
+            // and remains alive until its blocked task resumes.
+            assert!(unsafe { &*parent_wait }.notify_one_from_irq());
+            return;
+        }
+        while !IDLE_RELEASED.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+    }
+
+    pub(crate) fn idle_reached() -> bool {
+        IDLE_REACHED.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn local_irq_worker_ran_before_wait() -> bool {
+        LOCAL_IRQ_RAN_BEFORE_WAIT.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn stop_modeling_remote_waker() {
+        REMOTE_WAKER_TASK_ID.store(0, Ordering::Release);
+    }
+
+    pub(crate) fn release_idle() {
+        IDLE_RELEASED.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn finish() {
+        release_block();
+        release_idle();
+        stop_modeling_remote_waker();
+        LOCAL_IRQ_WAIT.store(ptr::null_mut(), Ordering::Release);
+        LOCAL_IRQ_WORKER_RAN.store(ptr::null_mut(), Ordering::Release);
+        LOCAL_IRQ_PARENT_WAIT.store(ptr::null_mut(), Ordering::Release);
+        HANDLE_RESCHEDULE_IPI.store(false, Ordering::Release);
+        REMOTE_ENQUEUE_ACTIVE.store(false, Ordering::Release);
+        IRQ_HANDLER_ACTIVE.store(false, Ordering::Release);
+        LOCAL_IRQ_RAN_BEFORE_WAIT.store(false, Ordering::Release);
+        IDLE_HOOK_ARMED.store(false, Ordering::Release);
+    }
+}
+
+// A deferred wake drained by this CPU cannot self-kick through the IPI path.
+// Preemptive schedulers force a reschedule on the incoming task instead. FIFO
+// builds have no such task flag, so remember only the dangerous case where the
+// incoming task is idle and would otherwise enter WFI with ready work queued.
+#[cfg(all(feature = "smp", not(feature = "preempt")))]
+static LOCAL_DEFERRED_WAKE_PENDING: [core::sync::atomic::AtomicBool;
+    crate::build_info::CPU_CAPACITY] =
+    [const { core::sync::atomic::AtomicBool::new(false) }; crate::build_info::CPU_CAPACITY];
+
+#[cfg(all(feature = "smp", not(feature = "preempt")))]
+fn request_local_deferred_wake_before_idle() {
+    LOCAL_DEFERRED_WAKE_PENDING[this_cpu_id()].store(true, core::sync::atomic::Ordering::Release);
+}
+
+/// Returns whether switch-tail work made a local task runnable after idle had
+/// already been selected. The idle loop consumes this before entering WFI.
+#[cfg(all(feature = "smp", not(feature = "preempt")))]
+pub(crate) fn take_local_deferred_wake_before_idle() -> bool {
+    LOCAL_DEFERRED_WAKE_PENDING[this_cpu_id()].swap(false, core::sync::atomic::Ordering::AcqRel)
+}
+
+// A FIFO idle CPU cannot switch directly from an IRQ action because the
+// controller and architecture still own a live interrupt-return frame. Record
+// the edge and consume it from ax-hal's common IRQ-exit boundary instead.
+#[cfg(all(feature = "irq", not(feature = "preempt")))]
+static LOCAL_IRQ_WAKE_PENDING: [core::sync::atomic::AtomicBool; crate::build_info::CPU_CAPACITY] =
+    [const { core::sync::atomic::AtomicBool::new(false) }; crate::build_info::CPU_CAPACITY];
+
+#[cfg(all(feature = "irq", not(feature = "preempt")))]
+fn request_local_irq_reschedule_if_idle(cpu_id: usize) {
+    if cpu_id == this_cpu_id()
+        && crate::current_may_uninit().is_some_and(|current| current.is_idle())
+    {
+        LOCAL_IRQ_WAKE_PENDING[cpu_id].store(true, core::sync::atomic::Ordering::Release);
+    }
+}
+
+#[cfg(all(feature = "irq", not(feature = "preempt")))]
+pub(crate) fn handle_irq_exit() {
+    if !LOCAL_IRQ_WAKE_PENDING[this_cpu_id()].swap(false, core::sync::atomic::Ordering::AcqRel) {
+        return;
+    }
+    if crate::current_may_uninit().is_some() {
+        current_run_queue::<RawState>().inner.reschedule_idle();
+    }
+}
 
 struct PreviousTask {
     task: NonNull<crate::AxTask>,
@@ -43,6 +287,7 @@ macro_rules! percpu_static {
 percpu_static! {
     RUN_QUEUE: LazyInit<AxRunQueue> = LazyInit::new(),
     EXITED_TASKS: VecDeque<AxTaskRef> = VecDeque::new(),
+    EXIT_GENERATION: usize = 0,
     WAIT_FOR_EXIT: WaitQueue = WaitQueue::new(),
     IDLE_TASK: LazyInit<AxTaskRef> = LazyInit::new(),
     /// Stores the previous task and the exact CPU-binding epoch withdrawn by
@@ -195,6 +440,8 @@ pub fn handle_ipi_reschedule() {
     if crate::current_may_uninit().is_some() {
         CurrentRunQueueRef::<RawState>::force_resched_from_irq();
     }
+    #[cfg(not(feature = "preempt"))]
+    request_local_irq_reschedule_if_idle(this_cpu_id());
 }
 
 #[cfg(all(test, feature = "smp", feature = "ipi", feature = "host-test"))]
@@ -722,6 +969,8 @@ impl<G: GuardState> AxRunQueueRef<G> {
             if let Some(task_id_name) = task_id_name {
                 debug!("task unblock: {task_id_name} on run_queue {cpu_id}");
             }
+            #[cfg(all(feature = "irq", not(feature = "preempt")))]
+            self.inner.reschedule_local_idle_after_wake();
             // Note: when the task is unblocked on another CPU's run queue,
             // we just ignore the `resched` flag.
             if resched && cpu_id == this_cpu_id() {
@@ -755,6 +1004,8 @@ impl<G: GuardState> CurrentRunQueueRef<G> {
             if let Some(task_id_name) = task_id_name {
                 debug!("task unblock: {task_id_name} on run_queue {cpu_id}");
             }
+            #[cfg(all(feature = "irq", not(feature = "preempt")))]
+            self.inner.reschedule_local_idle_after_wake();
             if resched {
                 #[cfg(feature = "preempt")]
                 crate::current().set_preempt_pending(true);
@@ -939,6 +1190,8 @@ impl<G: GuardState> CurrentRunQueueRef<G> {
                         // Push current task to the list consumed by the GC task.
                         EXITED_TASKS
                             .with_current_mut(exclusive, |tasks| tasks.push_back(curr.clone()));
+                        let generation = EXIT_GENERATION.read_current(pin);
+                        EXIT_GENERATION.write_current(pin, generation.wrapping_add(1));
                         WAIT_FOR_EXIT.with_current_mut(exclusive, |wait| wait.notify_one(false));
                     })
                 })
@@ -981,6 +1234,15 @@ impl<G: GuardState> CurrentRunQueueRef<G> {
         }
         // Drop the lock of wait queue explicitly.
         drop(wq_guard);
+
+        #[cfg(all(
+            test,
+            feature = "host-test",
+            feature = "smp",
+            feature = "ipi",
+            not(feature = "preempt")
+        ))]
+        deferred_wake_test::pause_after_block(curr.id().as_u64());
 
         // Current task's state has been changed to `Blocked` and added to the wait queue.
         // Note that the state may have been set as `Ready` in `unblock_task()`,
@@ -1085,6 +1347,15 @@ impl AxRunQueue {
             let waking_current_task = current_state == TaskState::Blocked
                 && self.cpu_id == this_cpu_id()
                 && crate::current().ptr_eq(&task);
+            #[cfg(all(
+                test,
+                feature = "host-test",
+                feature = "smp",
+                feature = "ipi",
+                not(feature = "preempt")
+            ))]
+            let waking_current_task =
+                waking_current_task && !deferred_wake_test::models_remote_waker(task.id().as_u64());
             // A blocked task woken here may still be finishing its context
             // switch-out on its owning CPU: `on_cpu == true` means its registers
             // are not yet fully saved. It must NOT be made runnable (enqueued)
@@ -1129,6 +1400,48 @@ impl AxRunQueue {
         } else {
             false
         }
+    }
+
+    /// Runs newly ready local work before a cooperative idle task can enter
+    /// the architecture IRQ wait. Remote queues are awakened by the IPI path,
+    /// while switch-tail wake stashes use the deferred-idle handshake.
+    #[cfg(all(feature = "irq", not(feature = "preempt")))]
+    fn reschedule_local_idle_after_wake(&self) {
+        let in_irq_context = ax_hal::irq::in_irq_context();
+        #[cfg(all(
+            test,
+            feature = "host-test",
+            feature = "smp",
+            feature = "ipi",
+            not(feature = "preempt")
+        ))]
+        let in_irq_context = in_irq_context || deferred_wake_test::irq_handler_active();
+        if !in_irq_context {
+            return;
+        }
+        #[cfg(all(
+            test,
+            feature = "host-test",
+            feature = "smp",
+            feature = "ipi",
+            not(feature = "preempt")
+        ))]
+        if deferred_wake_test::has_remote_waker() {
+            return;
+        }
+        request_local_irq_reschedule_if_idle(self.cpu_id);
+    }
+
+    #[cfg(all(feature = "irq", not(feature = "preempt")))]
+    fn reschedule_idle(&self) {
+        if self.cpu_id != this_cpu_id() {
+            return;
+        }
+        let Some(current) = crate::current_may_uninit().filter(|current| current.is_idle()) else {
+            return;
+        };
+        current.set_state(TaskState::Ready);
+        self.resched();
     }
 
     /// Core reschedule subroutine.
@@ -1256,19 +1569,22 @@ impl AxRunQueue {
 fn gc_entry() {
     loop {
         // Drop all exited tasks and recycle resources.
-        let n = {
+        let (n, observed_generation) = {
             let _guard = crate::sync::PreemptIrqSaveGuard::new();
             // SAFETY: the guard prevents migration and IRQ re-entry, and the
             // closure does not let the per-CPU borrow escape.
             unsafe {
                 ax_hal::percpu::with_cpu_pin(|pin| {
                     ax_hal::percpu::with_exclusive_cpu(pin, |exclusive| {
-                        EXITED_TASKS.with_current_mut(exclusive, |tasks| tasks.len())
+                        let n = EXITED_TASKS.with_current_mut(exclusive, |tasks| tasks.len());
+                        (n, EXIT_GENERATION.read_current(pin))
                     })
                 })
             }
             .expect("GC requires an installed CPU-local area")
         };
+        #[cfg(feature = "irq")]
+        let mut retained = false;
         for _ in 0..n {
             // Do not do the slow drops in the critical section.
             let task = {
@@ -1301,31 +1617,44 @@ fn gc_entry() {
                         })
                     }
                     .expect("GC requires an installed CPU-local area");
+                    #[cfg(feature = "irq")]
+                    {
+                        retained = true;
+                    }
                 }
             }
         }
-        // Always wait with a timeout to:
-        // 1. Yield CPU to allow other tasks to complete `switch_to` and drop references
-        // 2. Handle the race condition where `notify_one` is called before the GC task enters wait,
-        //    causing the notification to be lost.
-        // The GC task's affinity pins it to this CPU across the blocking wait;
-        // WaitQueue is internally synchronized, so IRQ and other tasks may use
-        // shared access while this callback is suspended.
-        #[cfg(feature = "irq")]
+        // EXIT_GENERATION is the durable condition; WAIT_FOR_EXIT is only its
+        // notification edge. The snapshot precedes processing this batch, so
+        // an exit arriving during processing makes the condition immediately
+        // true. Empty queues wait indefinitely. A bounded retry remains only
+        // while another owner still holds an exited task, so its stack
+        // continues to be released by this CPU's GC task.
         unsafe {
             ax_hal::percpu::with_cpu_pin(|pin| {
                 WAIT_FOR_EXIT.with_current(pin, |wait| {
-                    let _timeout = wait.wait_timeout(core::time::Duration::from_millis(100));
+                    let new_exit = || EXIT_GENERATION.read_current(pin) != observed_generation;
+                    #[cfg(feature = "irq")]
+                    if gc_wait_requires_retry(retained) {
+                        let _timeout = wait.wait_background_timeout_until(
+                            core::time::Duration::from_millis(100),
+                            new_exit,
+                        );
+                    } else {
+                        wait.wait_until(new_exit);
+                    }
+                    #[cfg(not(feature = "irq"))]
+                    wait.wait_until(new_exit);
                 })
             })
         }
         .expect("GC wait requires an installed CPU-local area");
-        #[cfg(not(feature = "irq"))]
-        unsafe {
-            ax_hal::percpu::with_cpu_pin(|pin| WAIT_FOR_EXIT.with_current(pin, WaitQueue::wait))
-        }
-        .expect("GC wait requires an installed CPU-local area");
     }
+}
+
+#[cfg(any(feature = "irq", test))]
+pub(crate) const fn gc_wait_requires_retry(retained_exited_task: bool) -> bool {
+    retained_exited_task
 }
 
 /// The task routine for migrating the current task to the correct CPU.
@@ -1399,6 +1728,10 @@ pub(crate) unsafe fn clear_prev_task_on_cpu() {
             // reschedule the runtime IPI handler performed.
             #[cfg(feature = "preempt")]
             crate::current().set_force_resched_pending(true);
+            #[cfg(not(feature = "preempt"))]
+            if crate::current().is_idle() {
+                request_local_deferred_wake_before_idle();
+            }
         }
     }
 }
@@ -1451,6 +1784,11 @@ pub(crate) fn init() {
     unsafe {
         RUN_QUEUES[cpu_id].write(run_queue);
     }
+    #[cfg(all(feature = "irq", not(feature = "preempt")))]
+    assert!(
+        ax_hal::irq::install_irq_exit_handler(handle_irq_exit),
+        "another subsystem already owns the IRQ-exit scheduler hook",
+    );
 }
 
 pub(crate) fn init_secondary(stack_ptr: VirtAddr, stack_size: usize) {

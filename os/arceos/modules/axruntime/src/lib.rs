@@ -479,55 +479,97 @@ fn with_periodic_deadline<R>(
 fn init_timer() {
     ax_hal::time::enable_timer_irq();
     let now_ns = ax_hal::time::monotonic_time_nanos();
+    #[cfg(feature = "multitask")]
+    let periodic_required = ax_task::requires_periodic_timer_ticks();
+    #[cfg(not(feature = "multitask"))]
+    let periodic_required = false;
     with_periodic_deadline(|pin| {
-        NEXT_PERIODIC_DEADLINE_NANOS
-            .write_current(pin, now_ns.saturating_add(periodic_interval_nanos()));
+        NEXT_PERIODIC_DEADLINE_NANOS.write_current(
+            pin,
+            if periodic_required {
+                now_ns.saturating_add(periodic_interval_nanos())
+            } else {
+                0
+            },
+        );
     });
     program_next_timer();
 }
 
 #[cfg(feature = "irq")]
-fn advance_periodic_timer(now_ns: u64) -> bool {
-    let mut deadline = with_periodic_deadline(|pin| NEXT_PERIODIC_DEADLINE_NANOS.read_current(pin));
+fn advance_periodic_deadline(
+    periodic_required: bool,
+    mut deadline: u64,
+    now_ns: u64,
+    interval_ns: u64,
+) -> (u64, bool) {
+    if !periodic_required {
+        return (0, false);
+    }
     if deadline == 0 {
-        with_periodic_deadline(|pin| {
-            NEXT_PERIODIC_DEADLINE_NANOS
-                .write_current(pin, now_ns.saturating_add(periodic_interval_nanos()));
-        });
-        return false;
+        return (now_ns.saturating_add(interval_ns), true);
     }
     if now_ns < deadline {
-        return false;
+        return (deadline, false);
     }
 
     while deadline <= now_ns {
-        deadline = deadline.saturating_add(periodic_interval_nanos());
+        deadline = deadline.saturating_add(interval_ns);
         if deadline == u64::MAX {
             break;
         }
     }
+    (deadline, true)
+}
+
+#[cfg(feature = "irq")]
+fn advance_periodic_timer(now_ns: u64) -> bool {
+    #[cfg(feature = "multitask")]
+    let periodic_required = ax_task::requires_periodic_timer_ticks();
+    #[cfg(not(feature = "multitask"))]
+    let periodic_required = false;
+    let deadline = with_periodic_deadline(|pin| NEXT_PERIODIC_DEADLINE_NANOS.read_current(pin));
+    let (deadline, tick) = advance_periodic_deadline(
+        periodic_required,
+        deadline,
+        now_ns,
+        periodic_interval_nanos(),
+    );
     with_periodic_deadline(|pin| NEXT_PERIODIC_DEADLINE_NANOS.write_current(pin, deadline));
-    true
+    tick
 }
 
 #[cfg(feature = "irq")]
 fn program_next_timer() {
-    let mut deadline = with_periodic_deadline(|pin| NEXT_PERIODIC_DEADLINE_NANOS.read_current(pin));
-    if deadline == 0 {
-        let now_ns = ax_hal::time::monotonic_time_nanos();
-        deadline = now_ns.saturating_add(periodic_interval_nanos());
-        with_periodic_deadline(|pin| NEXT_PERIODIC_DEADLINE_NANOS.write_current(pin, deadline));
-    }
+    let periodic_deadline =
+        with_periodic_deadline(|pin| NEXT_PERIODIC_DEADLINE_NANOS.read_current(pin));
+    let periodic_deadline = (periodic_deadline != 0).then_some(periodic_deadline);
     #[cfg(feature = "multitask")]
     let task_deadline = ax_task::next_timer_deadline_nanos();
-    #[cfg(feature = "multitask")]
-    if let Some(task_deadline) = task_deadline {
-        deadline = core::cmp::min(deadline, task_deadline);
-    }
+    #[cfg(not(feature = "multitask"))]
+    let task_deadline = None;
 
-    ax_hal::time::set_oneshot_timer(deadline);
-    #[cfg(feature = "multitask")]
-    ax_task::note_programmed_timer_deadline_nanos(deadline);
+    match earliest_timer_deadline(periodic_deadline, task_deadline) {
+        Some(deadline) => {
+            ax_hal::time::set_oneshot_timer(deadline);
+            #[cfg(feature = "multitask")]
+            ax_task::note_programmed_timer_deadline_nanos(deadline);
+        }
+        None => {
+            ax_hal::time::disable_timer_irq();
+            #[cfg(feature = "multitask")]
+            ax_task::note_programmed_timer_deadline_nanos(0);
+        }
+    }
+}
+
+#[cfg(feature = "irq")]
+fn earliest_timer_deadline(periodic: Option<u64>, one_shot: Option<u64>) -> Option<u64> {
+    match (periodic, one_shot) {
+        (Some(periodic), Some(one_shot)) => Some(core::cmp::min(periodic, one_shot)),
+        (Some(deadline), None) | (None, Some(deadline)) => Some(deadline),
+        (None, None) => None,
+    }
 }
 
 #[cfg(feature = "irq")]
@@ -573,8 +615,39 @@ fn init_tls() {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "irq")]
+    use super::{advance_periodic_deadline, earliest_timer_deadline};
+
     #[test]
     fn fs_init_accepts_bootargs_without_fs_feature() {
         crate::fs::init(Some("root=/dev/nvme0n1"));
+    }
+
+    #[cfg(feature = "irq")]
+    #[test]
+    fn fifo_without_callbacks_has_no_synthetic_periodic_deadline() {
+        assert_eq!(
+            advance_periodic_deadline(false, 10_000, 20_000, 1_000),
+            (0, false)
+        );
+        assert_eq!(earliest_timer_deadline(None, None), None);
+        assert_eq!(earliest_timer_deadline(None, Some(30_000)), Some(30_000));
+    }
+
+    #[cfg(feature = "irq")]
+    #[test]
+    fn periodic_timer_catches_up_without_drifting() {
+        assert_eq!(
+            advance_periodic_deadline(true, 10_000, 12_500, 1_000),
+            (13_000, true)
+        );
+        assert_eq!(
+            advance_periodic_deadline(true, 0, 12_500, 1_000),
+            (13_500, true)
+        );
+        assert_eq!(
+            earliest_timer_deadline(Some(13_000), Some(12_750)),
+            Some(12_750)
+        );
     }
 }

@@ -24,6 +24,7 @@ percpu_static! {
 struct TaskWakeupEvent {
     ticket_id: u64,
     task: AxTaskRef,
+    resched: bool,
 }
 
 impl TimerEvent for TaskWakeupEvent {
@@ -41,22 +42,22 @@ impl TimerEvent for TaskWakeupEvent {
         // the CPU that owns and expires this timer event. Falling back to the
         // affinity selector is only needed if the task's affinity changed while
         // it was sleeping.
-        wake_task_from_timer(self.task)
+        wake_task_from_timer(self.task, self.resched)
     }
 }
 
 #[cfg(feature = "smp")]
-fn wake_task_from_timer(task: AxTaskRef) {
+fn wake_task_from_timer(task: AxTaskRef, resched: bool) {
     if task.cpumask().get(ax_hal::percpu::this_cpu_id()) {
-        current_run_queue::<RawState>().unblock_task(task, true);
+        current_run_queue::<RawState>().unblock_task(task, resched);
     } else {
-        select_run_queue::<RawState>(&task).unblock_task(task, true);
+        select_run_queue::<RawState>(&task).unblock_task(task, resched);
     }
 }
 
 #[cfg(not(feature = "smp"))]
-fn wake_task_from_timer(task: AxTaskRef) {
-    current_run_queue::<RawState>().unblock_task(task, true);
+fn wake_task_from_timer(task: AxTaskRef, resched: bool) {
+    current_run_queue::<RawState>().unblock_task(task, resched);
 }
 
 /// Registers a callback function to be called on each timer tick.
@@ -64,9 +65,23 @@ pub fn register_timer_callback<F>(callback: F)
 where
     F: Fn(TimeValue) + Send + Sync + 'static,
 {
-    with_local_exclusive(|exclusive| {
-        TIMER_CALLBACKS.with_current_mut(exclusive, |callbacks| callbacks.push(Box::new(callback)))
+    let first_callback = with_local_exclusive(|exclusive| {
+        TIMER_CALLBACKS.with_current_mut(exclusive, |callbacks| {
+            let first_callback = callbacks.is_empty();
+            callbacks.push(Box::new(callback));
+            first_callback
+        })
     });
+    if first_callback && !<crate::Scheduler as ax_sched::BaseScheduler>::REQUIRES_PERIODIC_TICK {
+        // A FIFO runtime may have disabled its comparator because it had no
+        // deadlines. Kick the common IRQ path once so it can establish the
+        // first periodic deadline for this callback.
+        maybe_reprogram_timer(monotonic_time());
+    }
+}
+
+pub(crate) fn has_periodic_callbacks() -> bool {
+    with_local_pin(|pin| TIMER_CALLBACKS.with_current(pin, |callbacks| !callbacks.is_empty()))
 }
 
 /// Registers a callback invoked on every hardware timer IRQ.
@@ -188,11 +203,26 @@ pub(crate) fn next_deadline_nanos() -> Option<u64> {
 }
 
 pub(crate) fn set_alarm_wakeup(deadline: TimeValue, task: AxTaskRef) {
+    set_alarm_wakeup_with_resched(deadline, task, true);
+}
+
+pub(crate) fn set_background_alarm_wakeup(deadline: TimeValue, task: AxTaskRef) {
+    set_alarm_wakeup_with_resched(deadline, task, false);
+}
+
+fn set_alarm_wakeup_with_resched(deadline: TimeValue, task: AxTaskRef, resched: bool) {
     with_local_exclusive(|exclusive| {
         TIMER_LIST.with_current_mut(exclusive, |timer_list| {
             let ticket_id = TIMER_TICKET_ID.fetch_add(1, Ordering::AcqRel);
             task.set_timer_ticket(ticket_id);
-            timer_list.set(deadline, TaskWakeupEvent { ticket_id, task });
+            timer_list.set(
+                deadline,
+                TaskWakeupEvent {
+                    ticket_id,
+                    task,
+                    resched,
+                },
+            );
         })
     });
     maybe_reprogram_timer(deadline);
@@ -244,7 +274,109 @@ fn with_local_exclusive<R>(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(all(
+        feature = "host-test",
+        feature = "preempt",
+        feature = "smp",
+        feature = "ipi"
+    ))]
+    use alloc::sync::Arc;
+    #[cfg(all(
+        feature = "host-test",
+        feature = "preempt",
+        feature = "smp",
+        feature = "ipi"
+    ))]
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    #[cfg(all(
+        feature = "host-test",
+        feature = "preempt",
+        feature = "smp",
+        feature = "ipi"
+    ))]
+    use ax_timer_list::TimerEvent;
+
     use super::timer_request_requires_reprogramming;
+
+    #[cfg(all(
+        feature = "host-test",
+        feature = "preempt",
+        feature = "smp",
+        feature = "ipi"
+    ))]
+    fn assert_timeout_wake_policy(resched: bool) {
+        crate::tests::run_in_test_scheduler(move || {
+            let wait = Arc::new(crate::WaitQueue::new());
+            let started = Arc::new(AtomicUsize::new(0));
+            let completed = Arc::new(AtomicUsize::new(0));
+            let worker = {
+                let wait = wait.clone();
+                let started = started.clone();
+                let completed = completed.clone();
+                crate::spawn(move || {
+                    started.store(1, Ordering::Release);
+                    wait.wait();
+                    completed.store(1, Ordering::Release);
+                })
+            };
+
+            for _ in 0..64 {
+                if started.load(Ordering::Acquire) == 1
+                    && worker.state() == crate::TaskState::Blocked
+                {
+                    break;
+                }
+                crate::yield_now();
+            }
+            assert_eq!(worker.state(), crate::TaskState::Blocked);
+
+            let current = crate::current();
+            current.set_preempt_pending(false);
+            let ticket_id = 1;
+            worker.set_timer_ticket(ticket_id);
+            {
+                let _guard = crate::sync::PreemptIrqSaveGuard::new();
+                super::TaskWakeupEvent {
+                    ticket_id,
+                    task: worker.clone(),
+                    resched,
+                }
+                .callback(ax_hal::time::TimeValue::from_nanos(1));
+                assert_eq!(worker.state(), crate::TaskState::Ready);
+                assert_eq!(current.preempt_pending_for_test(), resched);
+
+                // Keep this fixture in control when the IRQ/preempt guard drops.
+                current.set_preempt_pending(false);
+            }
+
+            crate::yield_now();
+            assert_eq!(worker.join(), 0);
+            assert_eq!(completed.load(Ordering::Acquire), 1);
+        });
+    }
+
+    #[test]
+    #[cfg(all(
+        feature = "host-test",
+        feature = "preempt",
+        feature = "smp",
+        feature = "ipi"
+    ))]
+    fn foreground_timer_timeout_requests_reschedule() {
+        assert_timeout_wake_policy(true);
+    }
+
+    #[test]
+    #[cfg(all(
+        feature = "host-test",
+        feature = "preempt",
+        feature = "smp",
+        feature = "ipi"
+    ))]
+    fn background_timer_timeout_preserves_foreground_execution() {
+        assert_timeout_wake_policy(false);
+    }
 
     #[test]
     fn elapsed_deadline_remains_owned_until_the_timer_irq_is_consumed() {

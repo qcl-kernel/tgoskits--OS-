@@ -114,6 +114,7 @@ impl<T, const S: usize> RRScheduler<T, S> {
 
 impl<T, const S: usize> BaseScheduler for RRScheduler<T, S> {
     type SchedItem = Arc<RRTask<T, S>>;
+    const REQUIRES_PERIODIC_TICK: bool = true;
 
     fn init(&mut self) {}
 

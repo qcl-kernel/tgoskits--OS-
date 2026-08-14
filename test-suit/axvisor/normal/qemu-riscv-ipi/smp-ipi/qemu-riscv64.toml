@@ -31,6 +31,7 @@ fail_regex = [
 ]
 success_regex = ['(?m)^guest smp ipi pass!\s*$']
 shell_prefix = "~ #"
-shell_init_cmd = "mount -t proc proc /proc 2>/dev/null || true; [ \"$(nproc)\" -ge 3 ] && dmesg | grep -q 'SBI IPI extension detected' && grep -Eq 'IPI[^:]*:.*[1-9]' /proc/interrupts && echo 'guest smp ipi pass!' || exit 1"
+shell_init_cmd = "mount -t proc proc /proc 2>/dev/null || true; start=$(cut -d. -f1 /proc/uptime); sleep 2; end=$(cut -d. -f1 /proc/uptime); [ \"$end\" -ge \"$((start + 1))\" ] && [ \"$(nproc)\" -ge 3 ] && dmesg | grep -q 'SBI IPI extension detected' && grep -Eq 'IPI[^:]*:.*[1-9]' /proc/interrupts && echo 'guest smp ipi pass!' || exit 1"
+timeout = 120
 to_bin = true
 uefi = false

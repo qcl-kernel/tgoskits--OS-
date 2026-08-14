@@ -23,6 +23,17 @@ use crate::host::{HostTime, default_host, task};
 static TOKEN: AtomicUsize = AtomicUsize::new(0);
 const TIMER_WORKER_STACK_SIZE: usize = 0x20_000;
 const NO_PUBLISHED_DEADLINE: u64 = 0;
+const DEFERRED_WORKER_BIT: u64 = 1 << 63;
+const PUBLISHED_DEADLINE_MASK: u64 = DEFERRED_WORKER_BIT - 1;
+
+/// Determines where an expired VM timer event is drained.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum VmTimerDispatch {
+    /// A task-context worker must drain the event.
+    DeferredWorker,
+    /// The architecture drains the event from its host-IRQ return path.
+    SynchronousIrqReturn,
+}
 
 /// Lock-free publication of one CPU's earliest AxVM timer deadline.
 ///
@@ -41,32 +52,49 @@ impl PublishedTimerDeadline {
     }
 
     pub(crate) fn deadline_nanos(&self) -> Option<u64> {
-        match self.deadline_nanos.load(Ordering::Acquire) {
+        match self.deadline_nanos.load(Ordering::Acquire) & PUBLISHED_DEADLINE_MASK {
             NO_PUBLISHED_DEADLINE => None,
             deadline => Some(deadline),
         }
     }
 
-    fn publish(&self, deadline: Option<TimeValue>) {
-        let deadline = deadline.map_or(NO_PUBLISHED_DEADLINE, |deadline| {
-            (deadline.as_nanos().min(u64::MAX as u128) as u64).max(1)
+    fn publish(&self, deadline: Option<(TimeValue, VmTimerDispatch)>) {
+        let published = deadline.map_or(NO_PUBLISHED_DEADLINE, |(deadline, dispatch)| {
+            let deadline =
+                (deadline.as_nanos().min(u128::from(PUBLISHED_DEADLINE_MASK)) as u64).max(1);
+            match dispatch {
+                VmTimerDispatch::DeferredWorker => deadline | DEFERRED_WORKER_BIT,
+                VmTimerDispatch::SynchronousIrqReturn => deadline,
+            }
         });
-        self.deadline_nanos.store(deadline, Ordering::Release);
+        self.deadline_nanos.store(published, Ordering::Release);
     }
 
     /// Removes an elapsed publication before the common IRQ path rearms the
     /// shared host comparator. The AxVM worker republishes the next wheel
     /// deadline after consuming all expired events.
-    pub(crate) fn clear_if_elapsed(&self, now_nanos: u64) {
+    pub(crate) fn clear_if_elapsed(&self, now_nanos: u64) -> Option<VmTimerDispatch> {
         let mut observed = self.deadline_nanos.load(Ordering::Acquire);
-        while observed != NO_PUBLISHED_DEADLINE && observed <= now_nanos {
+        loop {
+            let deadline = observed & PUBLISHED_DEADLINE_MASK;
+            if deadline == NO_PUBLISHED_DEADLINE
+                || deadline > now_nanos.min(PUBLISHED_DEADLINE_MASK)
+            {
+                return None;
+            }
             match self.deadline_nanos.compare_exchange_weak(
                 observed,
                 NO_PUBLISHED_DEADLINE,
                 Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
-                Ok(_) => break,
+                Ok(_) => {
+                    return Some(if observed & DEFERRED_WORKER_BIT != 0 {
+                        VmTimerDispatch::DeferredWorker
+                    } else {
+                        VmTimerDispatch::SynchronousIrqReturn
+                    });
+                }
                 Err(current) => observed = current,
             }
         }
@@ -78,6 +106,52 @@ impl PublishedTimerDeadline {
 pub(crate) struct VmTimerHandle {
     token: usize,
     owner_cpu: usize,
+}
+
+/// Action taken after an architectural timer deadline expires.
+///
+/// A running vCPU is already forced out by the host timer IRQ, so sending an
+/// IPI to it would duplicate the exit. A vCPU blocked in WFI still needs an
+/// explicit runtime notification.
+#[cfg(any(target_arch = "aarch64", test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum VmTimerWake {
+    RunningVcpu,
+    WaitingVcpu { vm_id: usize, vcpu_id: usize },
+}
+
+#[cfg(any(target_arch = "aarch64", test))]
+impl VmTimerWake {
+    pub(crate) const fn running_vcpu() -> Self {
+        Self::RunningVcpu
+    }
+
+    pub(crate) const fn waiting_vcpu(vm_id: usize, vcpu_id: usize) -> Self {
+        Self::WaitingVcpu { vm_id, vcpu_id }
+    }
+
+    pub(crate) const fn dispatch(self) -> VmTimerDispatch {
+        match self {
+            Self::RunningVcpu => VmTimerDispatch::SynchronousIrqReturn,
+            Self::WaitingVcpu { .. } => VmTimerDispatch::DeferredWorker,
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    pub(crate) fn notify(self) -> crate::AxVmResult {
+        self.notify_with(crate::runtime::vcpus::notify_vcpu)
+    }
+
+    #[cfg(any(target_arch = "aarch64", test))]
+    fn notify_with(
+        self,
+        notify_vcpu: impl FnOnce(usize, usize) -> crate::AxVmResult,
+    ) -> crate::AxVmResult {
+        match self {
+            Self::RunningVcpu => Ok(()),
+            Self::WaitingVcpu { vm_id, vcpu_id } => notify_vcpu(vm_id, vcpu_id),
+        }
+    }
 }
 
 struct VmTimerEvent {
@@ -104,9 +178,16 @@ impl TimerEvent for VmTimerEvent {
     }
 }
 
+#[derive(Clone, Copy)]
+struct VmTimerRegistration {
+    owner_cpu: usize,
+    deadline: TimeValue,
+    dispatch: VmTimerDispatch,
+}
+
 struct TimerWheels {
     wheels: BTreeMap<usize, TimerList<VmTimerEvent>>,
-    owners: BTreeMap<usize, usize>,
+    registrations: BTreeMap<usize, VmTimerRegistration>,
     published_deadlines: BTreeMap<usize, Arc<PublishedTimerDeadline>>,
 }
 
@@ -114,7 +195,7 @@ impl TimerWheels {
     fn new() -> Self {
         Self {
             wheels: BTreeMap::new(),
-            owners: BTreeMap::new(),
+            registrations: BTreeMap::new(),
             published_deadlines: BTreeMap::new(),
         }
     }
@@ -135,12 +216,25 @@ impl TimerWheels {
     }
 
     fn publish_next_deadline(&self, cpu_id: usize, deadline: Option<TimeValue>) {
+        let publication = deadline.map(|deadline| {
+            let dispatch = if self.registrations.values().any(|registration| {
+                registration.owner_cpu == cpu_id
+                    && registration.deadline == deadline
+                    && registration.dispatch == VmTimerDispatch::DeferredWorker
+            }) {
+                VmTimerDispatch::DeferredWorker
+            } else {
+                VmTimerDispatch::SynchronousIrqReturn
+            };
+            (deadline, dispatch)
+        });
         self.published_deadlines
             .get(&cpu_id)
             .expect("AxVM timer wheel must publish only initialized CPUs")
-            .publish(deadline);
+            .publish(publication);
     }
 
+    #[cfg(test)]
     fn register(
         &mut self,
         owner_cpu: usize,
@@ -148,7 +242,31 @@ impl TimerWheels {
         deadline: TimeValue,
         event: VmTimerEvent,
     ) -> Option<TimeValue> {
-        self.owners.insert(token, owner_cpu);
+        self.register_with_dispatch(
+            owner_cpu,
+            token,
+            deadline,
+            VmTimerDispatch::DeferredWorker,
+            event,
+        )
+    }
+
+    fn register_with_dispatch(
+        &mut self,
+        owner_cpu: usize,
+        token: usize,
+        deadline: TimeValue,
+        dispatch: VmTimerDispatch,
+        event: VmTimerEvent,
+    ) -> Option<TimeValue> {
+        self.registrations.insert(
+            token,
+            VmTimerRegistration {
+                owner_cpu,
+                deadline,
+                dispatch,
+            },
+        );
         self.ensure_cpu(owner_cpu).set(deadline, event);
         let next_deadline = self.next_deadline(owner_cpu);
         self.publish_next_deadline(owner_cpu, next_deadline);
@@ -156,17 +274,24 @@ impl TimerWheels {
     }
 
     fn handle(&self, token: usize) -> Option<VmTimerHandle> {
-        self.owners
+        self.registrations
             .get(&token)
-            .copied()
-            .map(|owner_cpu| VmTimerHandle { token, owner_cpu })
+            .map(|registration| VmTimerHandle {
+                token,
+                owner_cpu: registration.owner_cpu,
+            })
     }
 
     fn cancel_handle(&mut self, handle: VmTimerHandle) -> Option<Option<TimeValue>> {
-        if self.owners.get(&handle.token).copied() != Some(handle.owner_cpu) {
+        if self
+            .registrations
+            .get(&handle.token)
+            .map(|registration| registration.owner_cpu)
+            != Some(handle.owner_cpu)
+        {
             return None;
         }
-        self.owners.remove(&handle.token);
+        self.registrations.remove(&handle.token);
         let wheel = self.wheels.get_mut(&handle.owner_cpu)?;
         wheel.cancel(|event| event.token == handle.token);
         let next_deadline = wheel.next_deadline();
@@ -184,7 +309,7 @@ impl TimerWheels {
             .get_mut(&owner_cpu)
             .and_then(|wheel| wheel.expire_one(now));
         if let Some((_, event)) = &expired {
-            self.owners.remove(&event.token);
+            self.registrations.remove(&event.token);
         }
         self.publish_next_deadline(owner_cpu, self.next_deadline(owner_cpu));
         expired
@@ -210,12 +335,21 @@ pub(crate) fn register_timer_handle(
     deadline_ns: u64,
     callback: Box<dyn FnOnce(Duration) + Send + 'static>,
 ) -> VmTimerHandle {
+    register_timer_handle_with_dispatch(deadline_ns, VmTimerDispatch::DeferredWorker, callback)
+}
+
+pub(crate) fn register_timer_handle_with_dispatch(
+    deadline_ns: u64,
+    dispatch: VmTimerDispatch,
+    callback: Box<dyn FnOnce(Duration) + Send + 'static>,
+) -> VmTimerHandle {
     let token = TOKEN.fetch_add(1, Ordering::Relaxed);
     let (owner_cpu, next_deadline) = with_current_timer_wheels(|cpu_id, timer_wheels| {
-        let next_deadline = timer_wheels.register(
+        let next_deadline = timer_wheels.register_with_dispatch(
             cpu_id,
             token,
             TimeValue::from_nanos(deadline_ns),
+            dispatch,
             VmTimerEvent::new(token, callback),
         );
         (cpu_id, next_deadline)
@@ -359,6 +493,8 @@ fn current_cpu_id() -> usize {
 #[cfg(test)]
 static TEST_CURRENT_CPU: AtomicUsize = AtomicUsize::new(0);
 #[cfg(test)]
+static TEST_STATE_LOCK: Mutex<()> = Mutex::new(());
+#[cfg(test)]
 static TEST_REARMS: Mutex<Vec<(usize, Option<TimeValue>)>> = Mutex::new(Vec::new());
 #[cfg(test)]
 static TEST_REMOTE_REARMS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
@@ -373,6 +509,48 @@ fn current_cpu_id() -> usize {
 #[cfg(test)]
 fn lock_test_mutex<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().expect("AxVM timer test mutex poisoned")
+}
+
+#[cfg(test)]
+pub(crate) fn lock_test_timer_state() -> MutexGuard<'static, ()> {
+    lock_test_mutex(&TEST_STATE_LOCK)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_test_timer_state() {
+    with_timer_wheels(|timer_wheels| {
+        *timer_wheels = TimerWheels::new();
+        timer_wheels.ensure_cpu(0);
+    });
+    lock_test_mutex(&TEST_REARMS).clear();
+    lock_test_mutex(&TEST_REMOTE_REARMS).clear();
+    TEST_CURRENT_CPU.store(0, Ordering::Release);
+    TEST_NOW_NS.store(0, Ordering::Release);
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_timer_now_ns(now_ns: u64) {
+    TEST_NOW_NS.store(now_ns, Ordering::Release);
+}
+
+#[cfg(test)]
+pub(crate) struct TestTimerCallback(VmTimerEvent);
+
+#[cfg(test)]
+impl TestTimerCallback {
+    pub(crate) fn run(self, now_ns: u64) {
+        self.0.callback(TimeValue::from_nanos(now_ns));
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn take_test_timer_callback(now_ns: u64) -> Option<TestTimerCallback> {
+    let event = with_current_timer_wheels(|cpu_id, timer_wheels| {
+        timer_wheels
+            .expire_one(cpu_id, TimeValue::from_nanos(now_ns))
+            .map(|(_, event)| event)
+    });
+    event.map(TestTimerCallback)
 }
 
 #[cfg(test)]
@@ -392,14 +570,8 @@ fn rearm_remote_owner_host_timer(owner_cpu: usize) {
 mod tests {
     use super::*;
 
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
-
     fn reset_global_timer_state() {
-        with_timer_wheels(|timer_wheels| *timer_wheels = TimerWheels::new());
-        lock_test_mutex(&TEST_REARMS).clear();
-        lock_test_mutex(&TEST_REMOTE_REARMS).clear();
-        TEST_CURRENT_CPU.store(0, Ordering::Release);
-        TEST_NOW_NS.store(0, Ordering::Release);
+        reset_test_timer_state();
     }
 
     fn set_current_cpu_for_test(cpu_id: usize) {
@@ -414,7 +586,7 @@ mod tests {
 
     #[test]
     fn host_timer_callback_path_dispatches_registered_event_once() {
-        let _guard = lock_test_mutex(&TEST_LOCK);
+        let _guard = lock_test_timer_state();
         reset_global_timer_state();
         TEST_CALLBACK_NOW_NS.store(0, Ordering::Release);
 
@@ -441,6 +613,60 @@ mod tests {
             with_timer_wheels(|timer_wheels| timer_wheels.handle(token)),
             None
         );
+    }
+
+    #[test]
+    fn architectural_deadline_notifies_only_a_vcpu_blocked_in_wfi() {
+        let _guard = lock_test_timer_state();
+        reset_global_timer_state();
+        static NOTIFY_COUNT: AtomicUsize = AtomicUsize::new(0);
+        static NOTIFIED_VM: AtomicUsize = AtomicUsize::new(usize::MAX);
+        static NOTIFIED_VCPU: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+        NOTIFY_COUNT.store(0, Ordering::Release);
+        NOTIFIED_VM.store(usize::MAX, Ordering::Release);
+        NOTIFIED_VCPU.store(usize::MAX, Ordering::Release);
+
+        let running = VmTimerWake::running_vcpu();
+        register_timer_handle_with_dispatch(
+            10_000_000,
+            running.dispatch(),
+            Box::new(move |_| {
+                running
+                    .notify_with(|_, _| {
+                        NOTIFY_COUNT.fetch_add(1, Ordering::AcqRel);
+                        Ok(())
+                    })
+                    .unwrap();
+            }),
+        );
+        take_test_timer_callback(10_000_000)
+            .expect("running-vCPU deadline should expire")
+            .run(10_000_000);
+        assert_eq!(NOTIFY_COUNT.load(Ordering::Acquire), 0);
+
+        let waiting = VmTimerWake::waiting_vcpu(7, 3);
+        register_timer_handle_with_dispatch(
+            20_000_000,
+            waiting.dispatch(),
+            Box::new(move |_| {
+                waiting
+                    .notify_with(|vm_id, vcpu_id| {
+                        NOTIFIED_VM.store(vm_id, Ordering::Release);
+                        NOTIFIED_VCPU.store(vcpu_id, Ordering::Release);
+                        NOTIFY_COUNT.fetch_add(1, Ordering::AcqRel);
+                        Ok(())
+                    })
+                    .unwrap();
+            }),
+        );
+        take_test_timer_callback(20_000_000)
+            .expect("WFI deadline should expire")
+            .run(20_000_000);
+
+        assert_eq!(NOTIFY_COUNT.load(Ordering::Acquire), 1);
+        assert_eq!(NOTIFIED_VM.load(Ordering::Acquire), 7);
+        assert_eq!(NOTIFIED_VCPU.load(Ordering::Acquire), 3);
     }
 
     #[test]
@@ -552,18 +778,120 @@ mod tests {
     #[test]
     fn timer_irq_clears_only_an_elapsed_publication() {
         let source = PublishedTimerDeadline::new();
-        source.publish(Some(Duration::from_nanos(20)));
+        source.publish(Some((
+            Duration::from_nanos(20),
+            VmTimerDispatch::DeferredWorker,
+        )));
 
-        source.clear_if_elapsed(19);
+        assert_eq!(source.clear_if_elapsed(19), None);
         assert_eq!(source.deadline_nanos(), Some(20));
 
-        source.clear_if_elapsed(20);
+        assert_eq!(
+            source.clear_if_elapsed(20),
+            Some(VmTimerDispatch::DeferredWorker)
+        );
         assert_eq!(source.deadline_nanos(), None);
+
+        assert_eq!(source.clear_if_elapsed(21), None);
+    }
+
+    #[test]
+    fn running_and_wfi_deadlines_publish_distinct_irq_dispatch() {
+        let mut timer_wheels = TimerWheels::new();
+        let running_deadline = Duration::from_millis(5);
+        let wfi_deadline = Duration::from_millis(10);
+        let source = timer_wheels.published_deadline(0);
+
+        timer_wheels.register_with_dispatch(
+            0,
+            61,
+            running_deadline,
+            VmTimerDispatch::SynchronousIrqReturn,
+            event(61),
+        );
+        timer_wheels.register_with_dispatch(
+            0,
+            62,
+            wfi_deadline,
+            VmTimerDispatch::DeferredWorker,
+            event(62),
+        );
+
+        assert_eq!(
+            source.clear_if_elapsed(5_000_000),
+            Some(VmTimerDispatch::SynchronousIrqReturn)
+        );
+        timer_wheels.expire_one(0, running_deadline);
+        assert_eq!(source.deadline_nanos(), Some(10_000_000));
+        assert_eq!(
+            source.clear_if_elapsed(10_000_000),
+            Some(VmTimerDispatch::DeferredWorker)
+        );
+    }
+
+    #[test]
+    fn a_deferred_event_wins_when_deadlines_are_equal() {
+        let mut timer_wheels = TimerWheels::new();
+        let deadline = Duration::from_millis(5);
+        let source = timer_wheels.published_deadline(0);
+
+        timer_wheels.register_with_dispatch(
+            0,
+            71,
+            deadline,
+            VmTimerDispatch::SynchronousIrqReturn,
+            event(71),
+        );
+        timer_wheels.register_with_dispatch(
+            0,
+            72,
+            deadline,
+            VmTimerDispatch::DeferredWorker,
+            event(72),
+        );
+
+        assert_eq!(
+            source.clear_if_elapsed(5_000_000),
+            Some(VmTimerDispatch::DeferredWorker)
+        );
+    }
+
+    #[test]
+    fn cancelling_a_wfi_deadline_republishes_synchronous_successor() {
+        let mut timer_wheels = TimerWheels::new();
+        let wfi_deadline = Duration::from_millis(5);
+        let running_deadline = Duration::from_millis(10);
+        let source = timer_wheels.published_deadline(0);
+
+        timer_wheels.register_with_dispatch(
+            0,
+            81,
+            wfi_deadline,
+            VmTimerDispatch::DeferredWorker,
+            event(81),
+        );
+        timer_wheels.register_with_dispatch(
+            0,
+            82,
+            running_deadline,
+            VmTimerDispatch::SynchronousIrqReturn,
+            event(82),
+        );
+        timer_wheels.cancel_handle(VmTimerHandle {
+            token: 81,
+            owner_cpu: 0,
+        });
+
+        assert_eq!(source.deadline_nanos(), Some(10_000_000));
+        assert_eq!(
+            source.clear_if_elapsed(10_000_000),
+            Some(VmTimerDispatch::SynchronousIrqReturn)
+        );
     }
 
     #[test]
     fn remote_cancel_reprograms_owner_cpu_timer() {
-        let _guard = lock_test_mutex(&TEST_LOCK);
+        let _guard = lock_test_timer_state();
         reset_global_timer_state();
 
         set_current_cpu_for_test(0);
@@ -613,7 +941,7 @@ mod tests {
 
     #[test]
     fn remote_handle_cancel_reprograms_the_recorded_owner_cpu() {
-        let _guard = lock_test_mutex(&TEST_LOCK);
+        let _guard = lock_test_timer_state();
         reset_global_timer_state();
 
         set_current_cpu_for_test(2);

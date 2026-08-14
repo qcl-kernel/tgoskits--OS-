@@ -44,7 +44,7 @@ pub use regs::GprIndex;
 pub use types::{
     RiscvAccessFlags, RiscvAccessWidth, RiscvGuestPhysAddr, RiscvGuestVirtAddr, RiscvHostPhysAddr,
     RiscvHostVirtAddr, RiscvIpiAbi, RiscvIpiCompletion, RiscvIpiRequest, RiscvNestedPagingConfig,
-    RiscvVcpuError, RiscvVcpuId, RiscvVcpuResult, RiscvVmExit, RiscvVmId,
+    RiscvTimerSnapshot, RiscvVcpuError, RiscvVcpuId, RiscvVcpuResult, RiscvVmExit, RiscvVmId,
 };
 
 pub use self::{

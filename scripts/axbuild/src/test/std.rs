@@ -45,6 +45,12 @@ const AX_TASK_FEATURE_PROFILES: &[PackageFeatureProfile] = &[
             "tests::might_sleep_reports_preempt_disabled_reason",
         ],
     },
+    PackageFeatureProfile {
+        name: "host-test+multitask+smp+ipi+nonpreempt-deferred-wake",
+        features: &["host-test", "multitask", "smp", "ipi"],
+        name_filter: Some("nonpreemptive_deferred_local_wake_runs_before_idle_wait"),
+        expected_tests: &["tests::nonpreemptive_deferred_local_wake_runs_before_idle_wait"],
+    },
 ];
 
 const AX_DRIVER_FEATURE_PROFILES: &[PackageFeatureProfile] = &[PackageFeatureProfile {

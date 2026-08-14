@@ -1,0 +1,26 @@
+args = [
+  "-nographic",
+  "-cpu",
+  "cortex-a72",
+  "-machine",
+  "virt,virtualization=on,gic-version=3",
+  "-smp",
+  "2",
+  "-m",
+  "2g",
+]
+fail_regex = [
+  "(?i)\\bpanic(?:ked)?\\b",
+  "(?i)kernel panic",
+  "(?i)data abort",
+  "(?i)esr_el2",
+  "(?i)hard fault",
+  "(?i)assertion failed",
+  "(?m)^rtprobe smoke failed",
+]
+success_regex = [
+  "(?m)^RTTHREAD_RTPROBE_CLOSURE_PASSED platform=axvisor\\s*$",
+]
+timeout = 780
+to_bin = true
+uefi = false

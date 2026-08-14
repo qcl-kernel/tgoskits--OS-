@@ -66,6 +66,7 @@ impl<T> FifoScheduler<T> {
 
 impl<T> BaseScheduler for FifoScheduler<T> {
     type SchedItem = Arc<FifoTask<T>>;
+    const REQUIRES_PERIODIC_TICK: bool = false;
 
     fn init(&mut self) {}
 

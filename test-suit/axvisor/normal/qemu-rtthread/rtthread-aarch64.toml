@@ -1,0 +1,25 @@
+[base]
+id = 1
+name = "rtthread-qemu"
+guest_type = "passthrough"
+cpu_num = 1
+phys_cpu_ids = [0]
+phys_cpu_sets = [2]
+
+[kernel]
+entry_point = 0x4008_0000
+image_location = "memory"
+kernel_path = "${workspace}/tmp/axbuild/axvisor/qemu-rtthread/rtthread.bin"
+kernel_load_addr = 0x4008_0000
+dtb_load_addr = 0x4440_3000
+# RT-Thread must reprogram CNTV before virtual interrupt deactivation. Split EOI
+# traps ICC_DIR_EL1 after the ISR instead of forcing an EOI-maintenance exit at
+# the ISR entry while the direct timer level is still asserted.
+cmdline = "console=ttyAMA0 earlycon cma=8M coherent_pool=2M rw pic.gicv3_eoimode=1 rtprobe.profile=closure rtprobe.platform=axvisor"
+memory_regions = [
+  [0x4000_0000, 0x0800_0000, 0x7, 0],
+]
+
+[devices]
+passthrough = []
+disabled = [{ path = "/pcie@10000000" }]

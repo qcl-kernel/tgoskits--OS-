@@ -1,0 +1,5 @@
+features = []
+log = "Info"
+target = "aarch64-unknown-none-softfloat"
+vm_configs = ["test-suit/axvisor/normal/qemu-rtthread/rtthread-aarch64.toml"]
+max_cpu_num = 4

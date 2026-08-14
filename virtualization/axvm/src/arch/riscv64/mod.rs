@@ -21,6 +21,7 @@ mod ipi;
 mod irq;
 mod npt;
 mod resource_pools;
+mod timer_wait;
 mod vm;
 pub use capabilities::{host_fdt_bootarg, host_phys_to_virt};
 pub use images::ImageLoader;
@@ -63,6 +64,7 @@ impl ArchOps for Riscv64Arch {
     }
 
     fn before_vcpu_run(vm: &crate::AxVMRef, vcpu: &crate::vm::AxVCpuRef<Self::VCpu>) -> AxVmResult {
+        vcpu.get_arch_vcpu().invalidate_timer_wait();
         sync_vplic_vseip(vm, vcpu)
     }
 
@@ -102,6 +104,46 @@ impl ArchOps for Riscv64Arch {
         // consumes a complete scause value, including its interrupt bit.
         let vector = SCAUSE_INTERRUPT_BIT | interrupt.id.0 as usize;
         vcpu.inject_interrupt_with_trigger(vector, interrupt.trigger)
+    }
+
+    fn wait_for_vcpu_event(
+        vm: &crate::AxVMRef,
+        vcpu: &crate::vm::AxVCpuRef<Self::VCpu>,
+        runtime: &crate::vm::VmRuntimeHandle,
+    ) {
+        let wait_snapshot = runtime.vcpu_event_wait_snapshot(vcpu.id());
+        if !vm.running() || wait_snapshot.has_pending_event(runtime) {
+            return;
+        }
+
+        let timer_deadline = timer_wait::guest_timer_deadline_ns(
+            vcpu.get_arch_vcpu().timer_snapshot(),
+            ax_std::os::arceos::modules::ax_hal::time::current_ticks(),
+            ax_std::os::arceos::modules::ax_hal::time::ticks_to_nanos,
+        );
+        match timer_deadline {
+            timer_wait::GuestTimerDeadline::Expired => return,
+            timer_wait::GuestTimerDeadline::Disabled => {}
+            timer_wait::GuestTimerDeadline::Future(deadline_ns) => {
+                let vm_id = vm.id();
+                let vcpu_id = vcpu.id();
+                vcpu.get_arch_vcpu().arm_timer_wait(deadline_ns, move || {
+                    if let Err(error) = crate::runtime::vcpus::notify_vcpu(vm_id, vcpu_id) {
+                        warn!(
+                            "failed to wake RISC-V VM[{vm_id}] vCPU {vcpu_id} for guest timer: \
+                             {error:?}"
+                        );
+                    }
+                });
+            }
+        }
+
+        crate::vm::wait_for_vcpu_event_if_idle(
+            runtime,
+            &wait_snapshot,
+            || vm.running(),
+            |condition| runtime.wait_until(condition),
+        );
     }
 
     fn handle_vcpu_exit_bound(
@@ -226,6 +268,9 @@ impl ArchOps for Riscv64Arch {
     }
 
     fn on_last_vcpu_exit(vm: &crate::AxVMRef) -> AxVmResult {
+        for vcpu in vm.vcpu_list() {
+            vcpu.get_arch_vcpu().invalidate_timer_wait();
+        }
         Self::deactivate_devices(vm)
     }
 }
@@ -338,11 +383,14 @@ impl RiscvHostOps for AxvmRiscvHostOps {
     }
 }
 
-pub(crate) struct AxvmRiscvVcpu(RiscvVCpu<AxvmRiscvHostOps>);
+pub(crate) struct AxvmRiscvVcpu {
+    inner: RiscvVCpu<AxvmRiscvHostOps>,
+    timer_wait: Arc<timer_wait::RiscvTimerWait>,
+}
 
 impl AxvmRiscvVcpu {
     fn latch_hvip_from_hw(&mut self) {
-        self.0.latch_hvip_from_hw();
+        self.inner.latch_hvip_from_hw();
     }
 
     fn decode_mmio_fault(
@@ -350,16 +398,28 @@ impl AxvmRiscvVcpu {
         addr: RiscvGuestPhysAddr,
         access_flags: RiscvAccessFlags,
     ) -> Option<RiscvVmExit> {
-        self.0.decode_mmio_fault(addr, access_flags)
+        self.inner.decode_mmio_fault(addr, access_flags)
     }
 
     fn sync_bound_vseip(&mut self, asserted: bool) -> AxVmResult {
-        riscv_result(self.0.sync_bound_vseip(asserted))
+        riscv_result(self.inner.sync_bound_vseip(asserted))
             .map_err(|error| crate::AxVmError::vcpu("synchronize RISC-V VSEIP", error))
     }
 
     fn complete_ipi(&mut self, request: RiscvIpiRequest, completion: RiscvIpiCompletion) {
-        self.0.complete_ipi(request, completion);
+        self.inner.complete_ipi(request, completion);
+    }
+
+    fn timer_snapshot(&self) -> Option<RiscvTimerSnapshot> {
+        self.inner.timer_snapshot()
+    }
+
+    fn arm_timer_wait(&self, deadline_ns: u64, wake: impl FnOnce() + Send + 'static) {
+        self.timer_wait.arm(deadline_ns, wake);
+    }
+
+    fn invalidate_timer_wait(&self) {
+        self.timer_wait.invalidate();
     }
 }
 
@@ -369,42 +429,45 @@ impl VmArchVcpuOps for AxvmRiscvVcpu {
     type Exit = RiscvVmExit;
 
     fn new(vm_id: VMId, vcpu_id: VCpuId, config: Self::CreateConfig) -> BackendResult<Self> {
-        riscv_result(RiscvVCpu::new(vm_id, vcpu_id, config)).map(Self)
+        riscv_result(RiscvVCpu::new(vm_id, vcpu_id, config)).map(|inner| Self {
+            inner,
+            timer_wait: timer_wait::RiscvTimerWait::new(),
+        })
     }
 
     fn set_entry(&mut self, entry: GuestPhysAddr) -> BackendResult {
-        riscv_result(self.0.set_entry(ax_guest_phys_addr_to_riscv(entry)))
+        riscv_result(self.inner.set_entry(ax_guest_phys_addr_to_riscv(entry)))
     }
 
     fn set_nested_page_table(&mut self, config: NestedPagingConfig) -> BackendResult {
         riscv_result(
-            self.0
+            self.inner
                 .set_nested_page_table(ax_nested_paging_to_riscv(config)),
         )
     }
 
     fn setup(&mut self, config: Self::SetupConfig) -> BackendResult {
-        riscv_result(self.0.setup(config))
+        riscv_result(self.inner.setup(config))
     }
 
     fn run(&mut self) -> BackendResult<Self::Exit> {
-        riscv_result(self.0.run())
+        riscv_result(self.inner.run())
     }
 
     fn bind(&mut self) -> BackendResult {
-        riscv_result(self.0.bind())
+        riscv_result(self.inner.bind())
     }
 
     fn unbind(&mut self) -> BackendResult {
-        riscv_result(self.0.unbind())
+        riscv_result(self.inner.unbind())
     }
 
     fn set_gpr(&mut self, reg: usize, val: usize) {
-        self.0.set_gpr(reg, val);
+        self.inner.set_gpr(reg, val);
     }
 
     fn inject_interrupt(&mut self, vector: usize) -> BackendResult {
-        riscv_result(self.0.inject_interrupt(vector))
+        riscv_result(self.inner.inject_interrupt(vector))
     }
 
     fn inject_interrupt_with_trigger(
@@ -416,13 +479,13 @@ impl VmArchVcpuOps for AxvmRiscvVcpu {
         // virtual pending bit. The vCPU injection operation is mode-agnostic.
         match trigger {
             InterruptTriggerMode::EdgeTriggered | InterruptTriggerMode::LevelTriggered => {
-                riscv_result(self.0.inject_interrupt(vector))
+                riscv_result(self.inner.inject_interrupt(vector))
             }
         }
     }
 
     fn set_return_value(&mut self, val: usize) {
-        self.0.set_return_value(val);
+        self.inner.set_return_value(val);
     }
 }
 

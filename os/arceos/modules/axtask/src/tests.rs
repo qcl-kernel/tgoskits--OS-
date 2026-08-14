@@ -16,7 +16,9 @@ use axpoll::{IoEvents, Pollable};
 #[cfg(feature = "irq")]
 use crate::IrqNotify;
 #[cfg(feature = "preempt")]
-use crate::sync::{PreemptGuard, SpinLock};
+use crate::sync::PreemptGuard;
+#[cfg(all(feature = "lockdep", feature = "preempt"))]
+use crate::sync::SpinLock;
 use crate::{WaitQueue, api as ax_task, current};
 
 type TestResult = Result<(), Box<dyn core::any::Any + Send>>;
@@ -237,6 +239,205 @@ fn test_sched_fifo() {
     });
 }
 
+#[cfg(all(
+    feature = "host-test",
+    feature = "smp",
+    feature = "ipi",
+    not(feature = "preempt")
+))]
+fn wait_for_deferred_wake_test_flag(
+    mut condition: impl FnMut() -> bool,
+    name: &str,
+) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !condition() {
+        if std::time::Instant::now() >= deadline {
+            return Err(format!("timed out waiting for {name}"));
+        }
+        thread::yield_now();
+    }
+    Ok(())
+}
+
+#[cfg(all(
+    feature = "host-test",
+    feature = "smp",
+    feature = "ipi",
+    not(feature = "preempt")
+))]
+#[test]
+fn nonpreemptive_deferred_local_wake_runs_before_idle_wait() {
+    run_in_test_scheduler(|| {
+        // Prime the idle task once so the actual race resumes its suspended
+        // `yield_now_unchecked()` stack, matching a CPU that was already idle
+        // before the cross-core wake. A first-ever idle entry yields again and
+        // would hide the lost local reschedule edge.
+        let prime_wait = Arc::new(WaitQueue::new());
+        crate::run_queue::deferred_wake_test::arm_idle_only();
+        let primer = {
+            let prime_wait = prime_wait.clone();
+            thread::spawn(move || -> Result<(), String> {
+                let outcome = wait_for_deferred_wake_test_flag(
+                    crate::run_queue::deferred_wake_test::idle_reached,
+                    "idle task to enter its first wait boundary",
+                );
+                ax_hal::percpu::initialize_host_test_cpu();
+                prime_wait.notify_one(true);
+                crate::run_queue::deferred_wake_test::release_idle();
+                outcome
+            })
+        };
+        prime_wait.wait();
+        let prime_outcome = primer.join().expect("idle primer thread panicked");
+        crate::run_queue::deferred_wake_test::finish();
+        prime_outcome.expect("failed to prime idle before deferred-wake race");
+
+        let worker_wait = Arc::new(WaitQueue::new());
+        let parent_wait = Arc::new(WaitQueue::new());
+        let worker_ran = Arc::new(core::sync::atomic::AtomicBool::new(false));
+
+        let worker = {
+            let worker_wait = worker_wait.clone();
+            let worker_ran = worker_ran.clone();
+            ax_task::spawn(move || {
+                worker_wait.wait();
+                worker_ran.store(true, Ordering::Release);
+            })
+        };
+
+        crate::run_queue::deferred_wake_test::arm(worker.id().as_u64());
+
+        let coordinator = {
+            let worker_wait = worker_wait.clone();
+            let parent_wait = parent_wait.clone();
+            let worker_ran = worker_ran.clone();
+            thread::spawn(move || {
+                let outcome = (|| -> Result<bool, String> {
+                    wait_for_deferred_wake_test_flag(
+                        crate::run_queue::deferred_wake_test::block_reached,
+                        "waiter to reach Blocked + on_cpu",
+                    )?;
+
+                    ax_hal::percpu::initialize_host_test_cpu();
+                    if !worker_wait.notify_one(true) {
+                        return Err("remote wake did not find the blocked waiter".into());
+                    }
+                    crate::run_queue::deferred_wake_test::release_block();
+
+                    wait_for_deferred_wake_test_flag(
+                        crate::run_queue::deferred_wake_test::idle_reached,
+                        "idle to reach its wait boundary",
+                    )?;
+                    Ok(worker_ran.load(Ordering::Acquire))
+                })();
+
+                crate::run_queue::deferred_wake_test::stop_modeling_remote_waker();
+                crate::run_queue::deferred_wake_test::release_block();
+                crate::run_queue::deferred_wake_test::release_idle();
+                let _ = worker_wait.notify_one(true);
+                parent_wait.notify_one(true);
+                outcome
+            })
+        };
+
+        parent_wait.wait();
+        let outcome = coordinator.join().expect("coordinator thread panicked");
+        assert_eq!(worker.join(), 0);
+        crate::run_queue::deferred_wake_test::finish();
+
+        assert!(
+            outcome.expect("deferred-wake test coordination failed"),
+            "a local deferred wake must run its waiter before idle reaches the IRQ wait boundary",
+        );
+    });
+}
+
+#[cfg(all(
+    feature = "host-test",
+    feature = "smp",
+    feature = "ipi",
+    feature = "irq",
+    not(feature = "preempt")
+))]
+#[test]
+fn nonpreemptive_local_irq_wake_reschedules_idle_before_irq_wait() {
+    run_in_test_scheduler(|| {
+        let worker_wait = Arc::new(WaitQueue::new());
+        let parent_wait = Arc::new(WaitQueue::new());
+        let worker_ran = Arc::new(core::sync::atomic::AtomicBool::new(false));
+
+        let worker = {
+            let worker_wait = worker_wait.clone();
+            let worker_ran = worker_ran.clone();
+            ax_task::spawn(move || {
+                worker_wait.wait();
+                worker_ran.store(true, Ordering::Release);
+            })
+        };
+
+        crate::run_queue::deferred_wake_test::arm_local_irq(
+            &worker_wait,
+            &worker_ran,
+            &parent_wait,
+        );
+        parent_wait.wait();
+        assert_eq!(worker.join(), 0);
+        let outcome = crate::run_queue::deferred_wake_test::local_irq_worker_ran_before_wait();
+        crate::run_queue::deferred_wake_test::finish();
+
+        assert!(
+            outcome,
+            "a local IRQ wake must run its ready worker before idle reaches the IRQ wait",
+        );
+    });
+}
+
+#[cfg(all(
+    feature = "host-test",
+    feature = "smp",
+    feature = "ipi",
+    feature = "irq",
+    not(feature = "preempt")
+))]
+#[test]
+fn nonpreemptive_remote_ipi_wake_reschedules_idle_before_irq_wait() {
+    run_in_test_scheduler(|| {
+        let worker_wait = Arc::new(WaitQueue::new());
+        let parent_wait = Arc::new(WaitQueue::new());
+        let worker_ran = Arc::new(core::sync::atomic::AtomicBool::new(false));
+
+        let worker = {
+            let worker_wait = worker_wait.clone();
+            let worker_ran = worker_ran.clone();
+            ax_task::spawn(move || {
+                worker_wait.wait();
+                worker_ran.store(true, Ordering::Release);
+            })
+        };
+
+        crate::run_queue::deferred_wake_test::arm_remote_ipi(
+            &worker_wait,
+            &worker_ran,
+            &parent_wait,
+        );
+        parent_wait.wait();
+        assert_eq!(worker.join(), 0);
+        let outcome = crate::run_queue::deferred_wake_test::local_irq_worker_ran_before_wait();
+        crate::run_queue::deferred_wake_test::finish();
+
+        assert!(
+            outcome,
+            "a remote reschedule IPI must run ready work before idle reaches the IRQ wait",
+        );
+    });
+}
+
+#[test]
+fn idle_gc_wait_is_event_driven_until_an_exited_task_is_retained() {
+    assert!(!crate::run_queue::gc_wait_requires_retry(false));
+    assert!(crate::run_queue::gc_wait_requires_retry(true));
+}
+
 #[test]
 fn test_fp_state_switch() {
     run_in_test_scheduler(|| {
@@ -374,6 +575,20 @@ fn test_irq_notify_wait_observes_notify_before_wait() {
 
 #[cfg(feature = "irq")]
 #[test]
+fn test_irq_notify_wait_observes_background_notify_before_wait() {
+    run_in_test_scheduler(|| {
+        let notify = IrqNotify::new();
+
+        notify.notify_irq_background();
+        notify.wait();
+
+        assert!(!notify.is_pending());
+        assert!(!notify.drain());
+    });
+}
+
+#[cfg(feature = "irq")]
+#[test]
 fn test_irq_notify_wakes_sleeping_deferred_worker() {
     run_in_test_scheduler(|| {
         let notify = Arc::new(IrqNotify::new());
@@ -409,6 +624,89 @@ fn test_irq_notify_wakes_sleeping_deferred_worker() {
 
         assert_eq!(finished.load(Ordering::Acquire), 1);
         assert!(!notify.drain());
+        assert_eq!(worker.join(), 0);
+    });
+}
+
+#[cfg(feature = "irq")]
+#[test]
+fn test_irq_notify_background_wakes_sleeping_deferred_worker() {
+    run_in_test_scheduler(|| {
+        let notify = Arc::new(IrqNotify::new());
+        let started_wq = Arc::new(WaitQueue::new());
+        let started = Arc::new(AtomicUsize::new(0));
+        let finished = Arc::new(AtomicUsize::new(0));
+
+        let worker = {
+            let notify = notify.clone();
+            let started_wq = started_wq.clone();
+            let started = started.clone();
+            let finished = finished.clone();
+            ax_task::spawn(move || {
+                started.store(1, Ordering::Release);
+                started_wq.notify_one(true);
+                notify.wait();
+                finished.store(1, Ordering::Release);
+            })
+        };
+
+        started_wq.wait_until(|| started.load(Ordering::Acquire) == 1);
+        assert_eq!(finished.load(Ordering::Acquire), 0);
+
+        notify.notify_irq_background();
+        for _ in 0..64 {
+            if finished.load(Ordering::Acquire) == 1 {
+                break;
+            }
+            ax_task::yield_now();
+        }
+
+        assert_eq!(finished.load(Ordering::Acquire), 1);
+        assert!(!notify.drain());
+        assert_eq!(worker.join(), 0);
+    });
+}
+
+#[cfg(all(feature = "irq", feature = "preempt"))]
+#[test]
+fn test_irq_notify_background_does_not_request_foreground_preemption() {
+    run_in_test_scheduler(|| {
+        let notify = Arc::new(IrqNotify::new());
+        let started_wq = Arc::new(WaitQueue::new());
+        let started = Arc::new(AtomicUsize::new(0));
+        let worker = {
+            let notify = notify.clone();
+            let started_wq = started_wq.clone();
+            let started = started.clone();
+            ax_task::spawn(move || {
+                started.store(1, Ordering::Release);
+                started_wq.notify_one(true);
+                notify.wait();
+            })
+        };
+
+        started_wq.wait_until(|| started.load(Ordering::Acquire) == 1);
+        for _ in 0..64 {
+            if worker.state() == crate::TaskState::Blocked {
+                break;
+            }
+            ax_task::yield_now();
+        }
+        assert_eq!(worker.state(), crate::TaskState::Blocked);
+
+        let current = current();
+        current.set_preempt_pending(false);
+        {
+            let _guard = PreemptGuard::new();
+            notify.notify_irq_background();
+            assert_eq!(worker.state(), crate::TaskState::Ready);
+            assert!(
+                !current.preempt_pending_for_test(),
+                "background IRQ notification must not preempt foreground work"
+            );
+        }
+
+        ax_task::yield_now();
         assert_eq!(worker.join(), 0);
     });
 }

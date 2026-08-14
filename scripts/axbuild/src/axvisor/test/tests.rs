@@ -7,7 +7,7 @@ use std::{
 use ostool::run::qemu::QemuConfig;
 use tempfile::tempdir;
 
-use super::*;
+use super::{qemu::prepare_qemu_case_scripts, *};
 use crate::{axvisor::build, context::ResolvedAxvisorRequest};
 
 const X86_LINUX_DIRECT_BOOT_CMDLINE_LIMIT: usize = 231;
@@ -513,6 +513,45 @@ fn qemu_test_request_ignores_inherited_vmconfigs() {
     let request = Axvisor::qemu_test_request(request);
 
     assert!(request.vmconfigs.is_empty());
+}
+
+#[test]
+fn qemu_case_prepare_scripts_run_once_with_case_environment() {
+    let root = tempdir().unwrap();
+    let case_dir = root.path().join("case");
+    fs::create_dir_all(&case_dir).unwrap();
+    let marker = root.path().join("prepared.txt");
+    fs::write(
+        case_dir.join("prepare.sh"),
+        format!(
+            "#!/bin/sh\nset -eu\nprintf '%s\\n%s\\n' \"$AXBUILD_WORKSPACE_ROOT\" \
+             \"$AXBUILD_CASE_DIR\" >> '{}'\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+
+    prepare_qemu_case_scripts(root.path(), [case_dir.as_path(), case_dir.as_path()]).unwrap();
+
+    let lines = fs::read_to_string(marker).unwrap();
+    assert_eq!(
+        lines.lines().collect::<Vec<_>>(),
+        [
+            root.path().to_string_lossy().as_ref(),
+            case_dir.to_string_lossy().as_ref(),
+        ]
+    );
+}
+
+#[test]
+fn qemu_case_prepare_script_failure_stops_the_test_group() {
+    let root = tempdir().unwrap();
+    let case_dir = root.path().join("case");
+    fs::create_dir_all(&case_dir).unwrap();
+    fs::write(case_dir.join("prepare.sh"), "#!/bin/sh\nexit 23\n").unwrap();
+
+    let error = prepare_qemu_case_scripts(root.path(), [case_dir.as_path()]).unwrap_err();
+    assert!(error.to_string().contains("exited with"));
 }
 
 #[test]

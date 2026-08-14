@@ -117,7 +117,22 @@ pub(crate) trait BootImagePlatform {
     }
 }
 
-/// Architecture-specific host timer policy used by the ArceOS adapter.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TimerWorkerWake {
+    Foreground,
+    Background,
+}
+
+fn timer_worker_wake(dispatch: Option<crate::timer::VmTimerDispatch>) -> Option<TimerWorkerWake> {
+    match dispatch {
+        Some(crate::timer::VmTimerDispatch::DeferredWorker) => Some(TimerWorkerWake::Foreground),
+        Some(crate::timer::VmTimerDispatch::SynchronousIrqReturn) => {
+            Some(TimerWorkerWake::Background)
+        }
+        None => None,
+    }
+}
+
 pub(crate) trait HostTimePlatform {
     fn request_timer_deadline(deadline_ns: u64) {
         ax_std::os::arceos::modules::ax_task::request_timer_deadline_nanos(deadline_ns);
@@ -132,8 +147,13 @@ pub(crate) trait HostTimePlatform {
             published_deadline.deadline_nanos()
         });
         ax_std::os::arceos::modules::ax_task::register_timer_irq_callback(move |now| {
-            deadline_source.clear_if_elapsed(now.as_nanos().min(u64::MAX as u128) as u64);
-            notify.notify_irq();
+            let dispatch =
+                deadline_source.clear_if_elapsed(now.as_nanos().min(u64::MAX as u128) as u64);
+            match timer_worker_wake(dispatch) {
+                Some(TimerWorkerWake::Foreground) => notify.notify_irq(),
+                Some(TimerWorkerWake::Background) => notify.notify_irq_background(),
+                None => {}
+            }
         });
     }
 }
@@ -181,6 +201,19 @@ mod tests {
                 capability: "IPA bits",
                 cpu_id: 2,
             })
+        );
+    }
+
+    #[test]
+    fn timer_irq_uses_a_background_worker_fallback_for_synchronous_dispatch() {
+        assert_eq!(timer_worker_wake(None), None);
+        assert_eq!(
+            timer_worker_wake(Some(crate::timer::VmTimerDispatch::DeferredWorker)),
+            Some(TimerWorkerWake::Foreground)
+        );
+        assert_eq!(
+            timer_worker_wake(Some(crate::timer::VmTimerDispatch::SynchronousIrqReturn)),
+            Some(TimerWorkerWake::Background)
         );
     }
 }

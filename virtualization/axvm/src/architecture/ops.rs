@@ -19,6 +19,12 @@ pub(crate) trait ArchOps {
 
     fn clean_dcache_range(_addr: VirtAddr, _size: usize) {}
 
+    /// Prepares immutable host interrupt-dispatch state before an architecture
+    /// replaces the current-EL exception vector or exposes its IRQ handler.
+    fn prepare_host_irq_dispatch() -> AxVmResult {
+        Ok(())
+    }
+
     fn register_platform_irq_injector() {}
 
     fn vcpu_affinities(

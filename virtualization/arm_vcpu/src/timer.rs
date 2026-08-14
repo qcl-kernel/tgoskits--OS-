@@ -204,18 +204,19 @@ impl ArmTimerSnapshot {
             .irq_asserted(self.config.guest_counter(kind, physical_counter))
     }
 
+    /// Returns one timer's host-counter deadline while it can still fire.
+    pub const fn deadline(self, kind: ArmTimerKind, physical_counter: u64) -> Option<u64> {
+        self.context(kind).host_deadline(
+            kind,
+            self.config,
+            self.config.guest_counter(kind, physical_counter),
+        )
+    }
+
     /// Returns the earliest host-counter deadline that can wake this vCPU.
     pub const fn earliest_deadline(self, physical_counter: u64) -> Option<u64> {
-        let virtual_counter = physical_counter.wrapping_sub(self.config.virtual_offset);
-        let physical_guest_counter = physical_counter.wrapping_sub(self.config.physical_offset);
-        let virtual_deadline =
-            self.virtual_timer
-                .host_deadline(ArmTimerKind::Virtual, self.config, virtual_counter);
-        let physical_deadline = self.physical_timer.host_deadline(
-            ArmTimerKind::Physical,
-            self.config,
-            physical_guest_counter,
-        );
+        let virtual_deadline = self.deadline(ArmTimerKind::Virtual, physical_counter);
+        let physical_deadline = self.deadline(ArmTimerKind::Physical, physical_counter);
         match (virtual_deadline, physical_deadline) {
             (Some(virtual_deadline), Some(physical_deadline)) => {
                 let virtual_distance = virtual_deadline.wrapping_sub(physical_counter);
@@ -707,6 +708,54 @@ mod tests {
         };
 
         assert_eq!(snapshot.earliest_deadline(1_000), Some(1_030));
+    }
+
+    #[test]
+    fn snapshot_exposes_the_software_physical_timer_run_deadline() {
+        let config = ArmTimerVmConfig::new(24_000_000, 100, 200).unwrap();
+        let virtual_timer = ArmTimerContext::default();
+        let mut physical_timer = ArmTimerContext::default();
+        physical_timer.write_compare(830);
+        physical_timer.write_control(ENABLE);
+        let snapshot = ArmTimerSnapshot {
+            config,
+            virtual_timer,
+            physical_timer,
+        };
+
+        assert_eq!(
+            snapshot.deadline(ArmTimerKind::Physical, 1_000),
+            Some(1_030)
+        );
+        assert_eq!(snapshot.earliest_deadline(1_000), Some(1_030));
+    }
+
+    #[test]
+    fn rearming_expired_physical_timer_with_tval_lowers_output_until_new_deadline() {
+        let config = ArmTimerVmConfig::new(24_000_000, 100, 200).unwrap();
+        let mut timer = ArmVcpuTimer::new(config, 0);
+        timer
+            .context_mut(ArmTimerKind::Physical)
+            .unwrap()
+            .write_compare(800);
+        timer.write_control(ArmTimerKind::Physical, ENABLE).unwrap();
+
+        assert!(
+            timer
+                .snapshot()
+                .unwrap()
+                .irq_asserted(ArmTimerKind::Physical, 1_000)
+        );
+
+        timer
+            .write_tval(ArmTimerKind::Physical, 1_000, 240_000)
+            .unwrap();
+        let rearmed = timer.snapshot().unwrap();
+        assert!(!rearmed.irq_asserted(ArmTimerKind::Physical, 1_000));
+        assert_eq!(
+            rearmed.deadline(ArmTimerKind::Physical, 1_000),
+            Some(241_000)
+        );
     }
 
     #[test]

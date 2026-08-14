@@ -478,12 +478,14 @@ fn vcpu_run() {
     info!("VM[{}] VCpu[{}] running...", vm.id(), vcpu.id());
 
     loop {
-        if vcpu_id == 0 {
+        let host_progress_requested = if vcpu_id == 0 {
             // Host services only publish a request and wake this task. Polling
             // here avoids running virtual-device and VGIC callbacks in host
             // console context, where an idle guest may otherwise stall input.
-            let _ = poll_primary_vcpu_devices_with(&runtime, || poll_vm_devices(&vm));
-        }
+            poll_primary_vcpu_devices_with(&runtime, || poll_vm_devices(&vm))
+        } else {
+            false
+        };
 
         match CurrentArch::run_vcpu(&vm, &vcpu) {
             Ok(VcpuRunAction {
@@ -587,11 +589,13 @@ fn vcpu_run() {
             break;
         }
 
-        // AxVM may run on ArceOS's cooperative FIFO scheduler. Yield after
-        // every completed VM exit so host services such as the management
-        // console and virtual serial input can make progress alongside a
-        // continuously runnable guest.
-        crate::host::task::yield_now();
+        // Request-driven host services need one scheduling point after their
+        // work is consumed. Routine timer and interrupt exits stay on the
+        // vCPU fast path so a periodic guest does not inherit unrelated FIFO
+        // scheduler latency on every tick.
+        if should_yield_after_vcpu_exit(host_progress_requested) {
+            crate::host::task::yield_now();
+        }
     }
 
     info!("VM[{}] VCpu[{}] exiting...", vm_id, vcpu_id);
@@ -601,6 +605,10 @@ fn poll_primary_vcpu_devices_with(runtime: &VmRuntimeHandle, poll_devices: impl 
     let consumed_request = runtime.take_device_poll_request();
     poll_devices();
     consumed_request
+}
+
+fn should_yield_after_vcpu_exit(host_progress_requested: bool) -> bool {
+    host_progress_requested
 }
 
 pub(super) fn poll_vm_devices(vm: &VMRef) {
@@ -656,7 +664,7 @@ mod tests {
         });
 
         request_published.wait();
-        let wait_snapshot = runtime.vcpu_event_wait_snapshot();
+        let wait_snapshot = runtime.vcpu_event_wait_snapshot(0);
         let wait_count = std::cell::Cell::new(0);
         crate::vm::wait_for_vcpu_event_if_idle(
             &runtime,
@@ -683,7 +691,7 @@ mod tests {
     #[test]
     fn request_published_at_wait_boundary_prevents_sleep_and_is_consumed_once() {
         let runtime = Arc::new(VmRuntimeHandle::new());
-        let wait_snapshot = runtime.vcpu_event_wait_snapshot();
+        let wait_snapshot = runtime.vcpu_event_wait_snapshot(0);
         let wait_boundary_reached = Arc::new(std::sync::Barrier::new(2));
         let request_published = Arc::new(std::sync::Barrier::new(2));
         let notifier_runtime = runtime.clone();
@@ -722,6 +730,16 @@ mod tests {
         }));
         assert_eq!(poll_count.get(), 2);
         notifier.join().unwrap();
+    }
+
+    #[test]
+    fn consumed_host_device_work_keeps_a_scheduler_progress_point() {
+        assert!(should_yield_after_vcpu_exit(true));
+    }
+
+    #[test]
+    fn routine_timer_exit_stays_on_the_vcpu_fast_path() {
+        assert!(!should_yield_after_vcpu_exit(false));
     }
 
     #[test]

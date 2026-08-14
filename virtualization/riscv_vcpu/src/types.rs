@@ -97,6 +97,34 @@ pub type RiscvVmId = usize;
 /// Virtual CPU identifier within a VM.
 pub type RiscvVcpuId = usize;
 
+/// Saved supervisor-timer state for an unbound guest vCPU.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RiscvTimerSnapshot {
+    compare_value: u64,
+    time_delta: u64,
+    enabled: bool,
+}
+
+impl RiscvTimerSnapshot {
+    /// Creates a snapshot from the guest compare value, `htimedelta`, and enable state.
+    pub const fn new(compare_value: u64, time_delta: u64, enabled: bool) -> Self {
+        Self {
+            compare_value,
+            time_delta,
+            enabled,
+        }
+    }
+
+    /// Returns the host time-counter tick at which the enabled guest timer expires.
+    pub const fn host_deadline_ticks(self) -> Option<u64> {
+        if !self.enabled || self.compare_value == u64::MAX {
+            None
+        } else {
+            Some(self.compare_value.wrapping_sub(self.time_delta))
+        }
+    }
+}
+
 /// The width of a guest memory access.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RiscvAccessWidth {

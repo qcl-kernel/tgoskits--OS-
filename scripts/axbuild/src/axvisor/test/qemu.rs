@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
+    process::Command,
     time::Instant,
 };
 
@@ -25,6 +26,7 @@ use crate::{
 };
 
 const VCPU_RUNTIME_ERROR: &str = r"VM\[\d+\] run VCpu\[\d+\] get error";
+const CASE_PREPARE_SCRIPT: &str = "prepare.sh";
 
 impl Axvisor {
     pub(super) async fn test_qemu(&mut self, args: ArgsTestQemu) -> anyhow::Result<()> {
@@ -138,6 +140,14 @@ impl Axvisor {
         // embedded VM configuration, so a later build would otherwise replace
         // the executable belonging to an earlier group.
         for (index, build_group) in build_groups.iter_mut().enumerate() {
+            prepare_qemu_case_scripts(
+                self.app.workspace_root(),
+                build_group
+                    .group
+                    .cases
+                    .iter()
+                    .map(|case| case.case.case.case_dir.as_path()),
+            )?;
             rootfs::ensure_qemu_rootfs_ready(&build_group.request, self.app.workspace_root(), None)
                 .await?;
             build_group.cargo = build::load_cargo_config(&build_group.request)?;
@@ -352,6 +362,48 @@ impl Axvisor {
         )
         .await
     }
+}
+
+pub(crate) fn prepare_qemu_case_scripts<'a>(
+    workspace_root: &Path,
+    case_dirs: impl IntoIterator<Item = &'a Path>,
+) -> anyhow::Result<()> {
+    let scripts = case_dirs
+        .into_iter()
+        .map(|case_dir| case_dir.join(CASE_PREPARE_SCRIPT))
+        .filter(|script| script.is_file())
+        .collect::<std::collections::BTreeSet<_>>();
+
+    for script in scripts {
+        println!(
+            "preparing Axvisor qemu case assets with {}",
+            script.display()
+        );
+        let status = Command::new("sh")
+            .arg(&script)
+            .current_dir(workspace_root)
+            .env("AXBUILD_WORKSPACE_ROOT", workspace_root)
+            .env(
+                "AXBUILD_CASE_DIR",
+                script
+                    .parent()
+                    .expect("case prepare script always has a parent"),
+            )
+            .status()
+            .with_context(|| {
+                format!(
+                    "failed to run Axvisor qemu prepare script {}",
+                    script.display()
+                )
+            })?;
+        anyhow::ensure!(
+            status.success(),
+            "Axvisor qemu prepare script {} exited with {status}",
+            script.display()
+        );
+    }
+
+    Ok(())
 }
 
 fn axvisor_qemu_test_build_args(arch: &str, config: Option<PathBuf>) -> AxvisorCliArgs {

@@ -113,5 +113,8 @@ impl ax_plat::time::TimeIf for GenericTimer {
         };
 
         somehal::timer::set_next_event_in_ticks(interval as _);
+        // A tickless runtime masks the local timer when it has no deadline.
+        // Programming a new one-shot deadline must make that IRQ observable.
+        somehal::timer::irq_enable();
     }
 }

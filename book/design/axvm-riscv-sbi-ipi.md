@@ -12,6 +12,12 @@ RISC-V guest SMP 启动和核间调度依赖 SBI IPI。SBI IPI 的调用约定�
 StarryOS syscall 或启动流程。成功标准是三核 Linux guest 能发现 SBI IPI extension、
 启动至少三个 CPU，并观察到非零 IPI 计数。
 
+本实现以 `upstream/dev` 的后续主线为基准。旧 PR #1681 已由 PR #1920 的分层 SBI IPI
+路由取代，旧补丁中的有效语义通过 `riscv_vcpu` 请求、AxVM RISC-V 路由和通用中断 sender
+保留。旧 PR #1692 只补充 `PSCI_VERSION`，当前主线已经覆盖完整 PSCI 0.2 调用面和 vCPU
+生命周期，因此不再重复合入旧提交。回归测试直接约束当前主线行为，避免把已经演进的实现
+退回旧架构边界。
+
 规范依据：
 
 - [SBI IPI Extension](https://github.com/riscv-non-isa/riscv-sbi-doc/blob/master/src/ext-ipi.adoc)
@@ -93,12 +99,34 @@ VSSIP 以 level-triggered `VirtualInterruptId(1)` 发布。当前 vCPU 和远端
 HVIP 的保存副本由 `riscv_vcpu` 独占；只有当前绑定到硬件的 vCPU 才同步写 CSR。这样迁移、
 解绑和重新绑定仍以保存状态为事实源，不要求 AxVM 路由层持有 vCPU 内部锁。
 
+### Sstc timer 所有权
+
+启用 Sstc 时，guest `set_timer` 只更新该 vCPU 的 `vstimecmp`，并清除上一轮保存的 VSTIP。
+它不能调用宿主 `sbi_rt::set_timer`，也不能修改宿主 STIE。宿主 AxVM timer wheel 和 ArceOS
+调度器共同使用 S-mode timer comparator；guest 覆盖 `stimecmp` 或 STIE 会让宿主 timer IRQ
+丢失，最终表现为 Linux guest 启动或运行过程中随机冻结。
+
+宿主收到 `SupervisorTimer` 后，`riscv_vcpu` 将其作为
+`ExternalInterrupt(S_TIMER)` 返回 ArceOS IRQ 路径，不能直接把它吞掉并注入 guest。guest
+timer 到期状态由硬件 `vstimecmp` 和 VSTIP 维护。AxVM 的 WFI timer wheel 只负责在期限附近
+唤醒 vCPU，重新绑定后仍由真实虚拟 timer 状态决定是否向 guest 注入 VSTIP。未启用 Sstc
+时继续使用原有 legacy SBI timer 路径。
+
 ## 验证与回滚
 
 回归只保留 `linux-smp3-ipi.toml`，删除不再提供额外覆盖的 RISC-V QEMU 单核配置。三核
 配置为新内核提供 128 MiB guest RAM，避免 64 MiB 配置在初始化驱动前只剩约 15 MiB
-可用内存而失去确定性。QEMU 用例同时检查 `nproc >= 3`、SBI IPI extension 日志和
-`/proc/interrupts` 非零 IPI 计数，最终输出唯一标记 `guest smp ipi pass!`。
+可用内存而失去确定性。该 guest 从生成 FDT 中排除宿主 PCI 根节点，避免 guest 与 AxVisor
+同时探测 AxVisor 根盘使用的 NVMe 控制器；guest 根盘继续使用独立映射的 VirtIO block
+设备。QEMU 用例同时检查 `nproc >= 3`、SBI IPI extension 日志和 `/proc/interrupts`
+非零 IPI 计数。用例还在 guest 中比较 `sleep 2` 前后的 `/proc/uptime`，要求至少推进
+1 秒，防止多核和 IPI 日志正常但 timer 已停止的假成功。全部断言通过后才输出唯一标记
+`guest smp ipi pass!`，并以 120 秒为失败上限。
+
+RISC-V WFI 退出使用与 AArch64 相同的运行时通知快照，并额外检查目标 vCPU 的通用中断
+队列和 legacy pending 队列。这样中断无论在等待快照前还是快照后发布，目标 vCPU 都不会
+在仍有待注入中断时进入睡眠。对应宿主回归必须构造“发布完成后才取得等待快照”的顺序，
+保证旧的裸 `runtime.wait()` 实现必然失败。
 
 最低层行为回归直接编译 RISC-V 生产模块，并通过 RISC-V musl test binary 在
 qemu-user 中执行。跨架构 crate test 的 musl target、静态链接、linker 和 qemu-user
@@ -111,7 +139,8 @@ vCPU 映射，以及运行时投递失败。参数错误用例同时断言完整
 ```bash
 cargo xtask cross-test --arch riscv64 \
   --package riscv_vcpu --package axvm \
-  --features axvm/host-test --no-default-features --lib ipi
+  --features axvm/host-test,axvm/sstc,riscv_vcpu/sstc \
+  --no-default-features --lib
 ```
 
 该目标相关行为测试保持在 RISC-V 私有模块和 vCPU 协议模块内部，不通过 `#[path]`
@@ -123,3 +152,23 @@ cargo xtask cross-test --arch riscv64 \
 
 若需要回滚，应整体移除 RISC-V IPI 请求处理、独立 QEMU 用例和本设计文档；不得保留公共层
 架构分支或恢复当前 vCPU 直接注入的特殊路径。
+
+## 2026-08-14 验证记录
+
+当前集成分支从 `upstream/dev` 提交 `56f8bfc82` 开始，正式 QEMU 用例使用
+`test-suit/axvisor/normal/qemu-riscv-ipi/smp-ipi`。同一命令连续独立运行三次，每次均为
+`PASS smp-ipi` 和 `result: 1/1 case(s) passed`，单次用例约 9.2 秒。三次日志均出现
+`smp: Brought up 1 node, 3 CPUs`、SBI IPI extension、非零 IPI 计数和唯一成功标志，
+`/proc/uptime` 推进断言也全部成立。
+
+本轮同时完成以下正式验证。
+
+- `cargo test -p axvm --no-default-features --features host-test --lib` 通过 `263/263`。
+- RISC-V Sstc 交叉测试通过 AxVM `284/284` 和 `riscv_vcpu` `11/11`。
+- `cargo test -p axvm --test arch_boundary_contract` 通过 `1/1`。
+- `cargo xtask clippy --package axvm` 的 6 个配置全部通过。
+- `cargo xtask clippy --package riscv_vcpu` 的 base 和 Sstc 配置全部通过。
+- `cargo fmt --all` 和 `git diff --check` 通过。
+
+这些结果只覆盖当前文档描述的 RISC-V 多核、IPI、timer、FDT 和架构边界。RTOS 启动、
+实时性压力、客户机 IP 网络和 AI 控制闭环需要各自在正式任务测试中通过后再记录。

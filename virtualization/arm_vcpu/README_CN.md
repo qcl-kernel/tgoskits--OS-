@@ -52,6 +52,8 @@ cargo doc --no-deps
 ### 示例
 
 ```rust
+# #[cfg(target_arch = "aarch64")]
+# mod aarch64_example {
 use arm_vcpu::{ArmHostOps, ArmVcpu, ArmVcpuCreateConfig, ArmVcpuResult};
 
 struct MyHost;
@@ -61,7 +63,7 @@ impl ArmHostOps for MyHost {
         Ok(())
     }
 
-    fn fetch_pending_host_irq() -> Option<usize> {
+    fn finish_pending_host_irq(_raw_ack: u32) -> Option<usize> {
         None
     }
 
@@ -71,6 +73,8 @@ impl ArmHostOps for MyHost {
 fn build_vcpu() -> ArmVcpuResult<ArmVcpu<MyHost>> {
     ArmVcpu::<MyHost>::new(0, 0, ArmVcpuCreateConfig::default())
 }
+# }
+# fn main() {}
 ```
 
 ### 文档

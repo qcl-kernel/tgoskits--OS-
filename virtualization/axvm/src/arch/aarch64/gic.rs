@@ -456,6 +456,10 @@ pub(crate) fn backend() -> Result<Arc<AxvmVgicBackend>, GicV3BackendError> {
     AxvmVgicBackend::new().map(Arc::new)
 }
 
+pub(crate) fn prepare_host_cpu_interface() -> Result<(), GicV3BackendError> {
+    cpu_interface::prepare_host_cpu_interface()
+}
+
 pub(crate) fn host_irq_config() -> Result<arm_vcpu::ArmHostIrqConfig, GicV3BackendError> {
     cpu_interface::host_irq_config()
 }
