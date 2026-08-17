@@ -1,0 +1,25 @@
+args = [
+  "-nographic",
+  "-cpu",
+  "cortex-a72",
+  "-machine",
+  "virt,virtualization=on,gic-version=3",
+  "-smp",
+  "2",
+  "-m",
+  "2g",
+]
+fail_regex = [
+  "(?i)panic(?:ked)?",
+  "(?i)kernel panic",
+  "(?i)data abort",
+  "(?i)esr_el2",
+  "(?i)hard fault",
+  "(?i)assertion failed",
+]
+success_regex = [
+  'RTTHREAD_RTPROBE_STARTED platform=axvisor profile=closure',
+]
+timeout = 60
+to_bin = true
+uefi = false

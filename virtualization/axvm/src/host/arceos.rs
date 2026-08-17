@@ -96,6 +96,7 @@ pub(crate) fn dispatch_host_irq(vector: usize) {
     modules::ax_hal::irq::handle_irq(vector);
 }
 
+#[cfg(target_arch = "aarch64")]
 pub(crate) fn with_acknowledged_host_irq_entry<T>(dispatch: impl FnOnce() -> T) -> T {
     modules::ax_hal::irq::with_acknowledged_irq_entry(dispatch)
 }
