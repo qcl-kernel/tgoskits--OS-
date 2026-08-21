@@ -33,6 +33,9 @@ fn vm_exit_restores_host_anchors_before_returning_to_rust() {
             "sd    t0, ({guest_a0})(a0)",
             "RESTORE_HOST_ANCHORS",
             "_restore_csrs:",
+            "ld    t1, ({hyp_stvec})(a0)",
+            "csrw  stvec, t1",
+            "csrrw t1, sstatus, t1",
         ],
     );
 

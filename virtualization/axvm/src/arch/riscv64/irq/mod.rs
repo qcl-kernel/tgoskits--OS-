@@ -228,10 +228,14 @@ impl RiscvPlicWiredSink {
 
 impl WiredIrqSink for RiscvPlicWiredSink {
     fn set_level(&self, input: ControllerInputId, asserted: bool) -> IrqResult {
-        self.vplic
+        let newly_asserted = self
+            .vplic
             .set_irq_line_level(input.value(), asserted)
             .map_err(|error| Self::backend_error(input, "set RISC-V vPLIC line level", error))?;
-        self.publish_vcpu_kicks(input)
+        if newly_asserted {
+            self.publish_vcpu_kicks(input)?;
+        }
+        Ok(())
     }
 
     fn pulse(&self, input: ControllerInputId) -> IrqResult {
