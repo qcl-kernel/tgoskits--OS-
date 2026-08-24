@@ -1,0 +1,339 @@
+{
+  "evidence": [
+    {
+      "evidence": [
+        "logs/phase9-smp3-run1-fixed.log",
+        "logs/phase9-smp3-run2-fixed.log",
+        "results/phase9-smp3-freeze.json"
+      ],
+      "id": "smp3_ipi_regression",
+      "status": "PASS"
+    },
+    {
+      "all_runs": [
+        {
+          "file": "/home/whiecloud/transfer-to-vm/task1-artifacts/results/starry_idle_5ms_30min_r1.csv",
+          "jitter_ns": {
+            "maximum": 22179100,
+            "p50": 234200,
+            "p95": 755500,
+            "p99": 3097600,
+            "p999": 4769500
+          },
+          "missed": 261,
+          "missed_rate": 0.000725,
+          "samples": 360000,
+          "seq_first": 0,
+          "seq_last": 359999
+        },
+        {
+          "file": "/home/whiecloud/transfer-to-vm/task1-artifacts/results/starry_idle_5ms_30min_r2.csv",
+          "jitter_ns": {
+            "maximum": 34939556900,
+            "p50": 237100,
+            "p95": 1800300,
+            "p99": 19844641400,
+            "p999": 33392894500
+          },
+          "missed": 8395,
+          "missed_rate": 0.023319444444444445,
+          "samples": 360000,
+          "seq_first": 0,
+          "seq_last": 359999
+        },
+        {
+          "file": "/home/whiecloud/transfer-to-vm/task1-artifacts/results/starry_idle_5ms_30min_r3.csv",
+          "jitter_ns": {
+            "maximum": 51445400,
+            "p50": 236800,
+            "p95": 715400,
+            "p99": 2999600,
+            "p999": 4565900
+          },
+          "missed": 196,
+          "missed_rate": 0.0005444444444444444,
+          "samples": 360000,
+          "seq_first": 0,
+          "seq_last": 359999
+        },
+        {
+          "file": "/home/whiecloud/transfer-to-vm/task1-artifacts/results/starry_idle_5ms_30min_r4.csv",
+          "jitter_ns": {
+            "maximum": 26011700,
+            "p50": 262000,
+            "p95": 710300,
+            "p99": 2912800,
+            "p999": 4494700
+          },
+          "missed": 178,
+          "missed_rate": 0.0004944444444444445,
+          "samples": 360000,
+          "seq_first": 0,
+          "seq_last": 359999
+        }
+      ],
+      "id": "starry_userspace_jitter",
+      "normal_runs_excluding_r2": [
+        {
+          "file": "/home/whiecloud/transfer-to-vm/task1-artifacts/results/starry_idle_5ms_30min_r1.csv",
+          "jitter_ns": {
+            "maximum": 22179100,
+            "p50": 234200,
+            "p95": 755500,
+            "p99": 3097600,
+            "p999": 4769500
+          },
+          "missed": 261,
+          "missed_rate": 0.000725,
+          "samples": 360000,
+          "seq_first": 0,
+          "seq_last": 359999
+        },
+        {
+          "file": "/home/whiecloud/transfer-to-vm/task1-artifacts/results/starry_idle_5ms_30min_r3.csv",
+          "jitter_ns": {
+            "maximum": 51445400,
+            "p50": 236800,
+            "p95": 715400,
+            "p99": 2999600,
+            "p999": 4565900
+          },
+          "missed": 196,
+          "missed_rate": 0.0005444444444444444,
+          "samples": 360000,
+          "seq_first": 0,
+          "seq_last": 359999
+        },
+        {
+          "file": "/home/whiecloud/transfer-to-vm/task1-artifacts/results/starry_idle_5ms_30min_r4.csv",
+          "jitter_ns": {
+            "maximum": 26011700,
+            "p50": 262000,
+            "p95": 710300,
+            "p99": 2912800,
+            "p999": 4494700
+          },
+          "missed": 178,
+          "missed_rate": 0.0004944444444444445,
+          "samples": 360000,
+          "seq_first": 0,
+          "seq_last": 359999
+        }
+      ],
+      "scope": "StarryOS user-space periodic wakeup jitter; not hardware IRQ response latency.",
+      "status": "PASS"
+    },
+    {
+      "id": "zephyr_native_baseline",
+      "result": {
+        "build": {
+          "binary": "baselines/zephyr-native/build/zephyr/zephyr.exe",
+          "board": "native_sim/native/64",
+          "zephyr_base": "/home/whiecloud/zephyrproject/zephyr"
+        },
+        "jitter_ns": {
+          "avg": 0,
+          "max": 0,
+          "p99": 0,
+          "p999": 0
+        },
+        "limitations": [
+          "native_sim uses host virtual clock; this is a functional baseline, not hardware IRQ latency",
+          "workload uses Zephyr k_busy_wait and is not directly equivalent to StarryOS rt_probe CSV"
+        ],
+        "missed": 0,
+        "platform": "zephyr-native-sim-64",
+        "samples": 2000,
+        "scenario": "periodic_busy_loop_1ms",
+        "schema_version": 1,
+        "source": "baselines/zephyr-native/zephyr-native-1ms-2000.log",
+        "status": "PASS"
+      },
+      "scope": "native_sim virtual-clock functional baseline; not hardware-comparable latency.",
+      "status": "PASS"
+    },
+    {
+      "id": "rtthread_native_and_axvisor_baseline",
+      "results": [
+        {
+          "jitter_ns": {
+            "avg": 5385,
+            "max": 198528,
+            "p99": 110848,
+            "p999": 178320
+          },
+          "missed": 0,
+          "platform": "native",
+          "samples": 2000,
+          "scenario": "continuous_1ms",
+          "source": "baselines/rtthread-native/closure-rerun-native.log"
+        },
+        {
+          "jitter_ns": {
+            "avg": 152837,
+            "max": 1645136,
+            "p99": 366896,
+            "p999": 568944
+          },
+          "missed": 0,
+          "platform": "native",
+          "samples": 6000,
+          "scenario": "periodic_idle_10ms",
+          "source": "baselines/rtthread-native/closure-rerun-native.log"
+        },
+        {
+          "jitter_ns": {
+            "avg": 109916,
+            "max": 2125712,
+            "p99": 309936,
+            "p999": 522928
+          },
+          "missed": 0,
+          "platform": "native",
+          "samples": 60000,
+          "scenario": "periodic_stress_long_10ms",
+          "source": "baselines/rtthread-native/closure-rerun-native.log"
+        },
+        {
+          "jitter_ns": {
+            "avg": 30774,
+            "max": 747744,
+            "p99": 544368,
+            "p999": 697600
+          },
+          "missed": 0,
+          "platform": "axvisor",
+          "samples": 2000,
+          "scenario": "continuous_1ms",
+          "source": "baselines/rtthread-axvisor/closure-rerun-axvisor.log"
+        },
+        {
+          "jitter_ns": {
+            "avg": 543477,
+            "max": 3631248,
+            "p99": 1013568,
+            "p999": 1394720
+          },
+          "missed": 0,
+          "platform": "axvisor",
+          "samples": 6000,
+          "scenario": "periodic_idle_10ms",
+          "source": "baselines/rtthread-axvisor/closure-rerun-axvisor.log"
+        },
+        {
+          "jitter_ns": {
+            "avg": 391474,
+            "max": 3230128,
+            "p99": 832304,
+            "p999": 1276176
+          },
+          "missed": 0,
+          "platform": "axvisor",
+          "samples": 60000,
+          "scenario": "periodic_stress_long_10ms",
+          "source": "baselines/rtthread-axvisor/closure-rerun-axvisor.log"
+        }
+      ],
+      "scope": "Periodic-task timing captures; compare only matching scenario/period rows.",
+      "status": "PASS"
+    },
+    {
+      "id": "strict_before_after",
+      "reason": "optimized-before paired raw data is not archived",
+      "required_capture": [
+        "host",
+        "qemu",
+        "guest",
+        "toolchain",
+        "raw_data",
+        "patch_sha256"
+      ],
+      "runtime_endpoint_capture": {
+        "artifacts": {
+          "axvisor_commit": "c9cbbfa6b7a07aaee71dc3e1c41da41724eebc4e",
+          "board_config": "/home/whiecloud/tgoskits-contest-integration/os/axvisor/configs/board/qemu-riscv64.toml",
+          "board_config_sha256": "714ef0583f958961778e73e6353a6ed55c284ad5705088d9f83068c27d23252a",
+          "rootfs": "/home/whiecloud/tgoskits-contest-integration/tmp/axbuild/rootfs/rootfs-riscv64-alpine.img/rootfs-riscv64-alpine.img",
+          "rootfs_sha256": "c72045b51bd3b05d8407a11195b65d72c4f00e02f79d9ad9249db555b97e9a66",
+          "serial_log": "/home/whiecloud/transfer-to-vm/task1-artifacts/results/strict/axvisor-linux-smp3-capture-rootfs-20260822.log",
+          "serial_log_sha256": "f3b51c69e99981cdfd3e58a6e58b7c625892893f5aec72f7f32ede4783bb8da4",
+          "trace_probe": "/home/whiecloud/transfer-to-vm/task1-artifacts/results/trace/trace_probe.riscv64",
+          "trace_probe_sha256": "c46e612e4bda5c469cfdc86e6fb09658a25c90f67483c4326dea1cfbfeb579bc",
+          "vm_config": "/home/whiecloud/tgoskits-contest-integration/os/axvisor/configs/vms/qemu/riscv64/linux-smp3-ipi.toml",
+          "vm_config_sha256": "520c6fa0930a0f4fec315cd9e0fda50cd2a55dfdb674422c5f4ae20ddc8b147c"
+        },
+        "captured_at": "2026-08-22T21:33:34+08:00",
+        "classification": "AXVISOR_HOST_WITH_LINUX_GUEST_NOT_STARRYOS",
+        "guest": {
+          "name": "linux-qemu-smp3-ipi",
+          "not_starryos": true,
+          "os": "Linux"
+        },
+        "host": {
+          "guest_vcpus": 3,
+          "host_smp": 4,
+          "qemu_arch": "riscv64"
+        },
+        "observed": [
+          "AxVisor host booted",
+          "4 host CPUs initialized",
+          "3 guest vCPUs started",
+          "Linux guest reached SMP bring-up",
+          "SBI IPI extension detected"
+        ],
+        "schema_version": 1,
+        "scope_note": "This is runtime endpoint evidence only. It is not a StarryOS guest capture, strict before/after data, or per-sample trace correlation.",
+        "status": "PASS_HOST_RUNTIME_ONLY"
+      },
+      "status": "PENDING"
+    },
+    {
+      "id": "trace_to_jitter_per_sample",
+      "matched_samples": 0,
+      "reason": "archived AxVisor trace has aggregate counters but no per-sample run_id/seq timestamps",
+      "required_record": "run_id=<id> seq=<n> ts_ns=<n>",
+      "runtime_endpoint_capture": {
+        "artifacts": {
+          "axvisor_commit": "c9cbbfa6b7a07aaee71dc3e1c41da41724eebc4e",
+          "board_config": "/home/whiecloud/tgoskits-contest-integration/os/axvisor/configs/board/qemu-riscv64.toml",
+          "board_config_sha256": "714ef0583f958961778e73e6353a6ed55c284ad5705088d9f83068c27d23252a",
+          "rootfs": "/home/whiecloud/tgoskits-contest-integration/tmp/axbuild/rootfs/rootfs-riscv64-alpine.img/rootfs-riscv64-alpine.img",
+          "rootfs_sha256": "c72045b51bd3b05d8407a11195b65d72c4f00e02f79d9ad9249db555b97e9a66",
+          "serial_log": "/home/whiecloud/transfer-to-vm/task1-artifacts/results/strict/axvisor-linux-smp3-capture-rootfs-20260822.log",
+          "serial_log_sha256": "f3b51c69e99981cdfd3e58a6e58b7c625892893f5aec72f7f32ede4783bb8da4",
+          "trace_probe": "/home/whiecloud/transfer-to-vm/task1-artifacts/results/trace/trace_probe.riscv64",
+          "trace_probe_sha256": "c46e612e4bda5c469cfdc86e6fb09658a25c90f67483c4326dea1cfbfeb579bc",
+          "vm_config": "/home/whiecloud/tgoskits-contest-integration/os/axvisor/configs/vms/qemu/riscv64/linux-smp3-ipi.toml",
+          "vm_config_sha256": "520c6fa0930a0f4fec315cd9e0fda50cd2a55dfdb674422c5f4ae20ddc8b147c"
+        },
+        "captured_at": "2026-08-22T21:33:34+08:00",
+        "classification": "AXVISOR_HOST_WITH_LINUX_GUEST_NOT_STARRYOS",
+        "guest": {
+          "name": "linux-qemu-smp3-ipi",
+          "not_starryos": true,
+          "os": "Linux"
+        },
+        "host": {
+          "guest_vcpus": 3,
+          "host_smp": 4,
+          "qemu_arch": "riscv64"
+        },
+        "observed": [
+          "AxVisor host booted",
+          "4 host CPUs initialized",
+          "3 guest vCPUs started",
+          "Linux guest reached SMP bring-up",
+          "SBI IPI extension detected"
+        ],
+        "schema_version": 1,
+        "scope_note": "This is runtime endpoint evidence only. It is not a StarryOS guest capture, strict before/after data, or per-sample trace correlation.",
+        "status": "PASS_HOST_RUNTIME_ONLY"
+      },
+      "status": "PENDING"
+    }
+  ],
+  "generated_at": "2026-08-22T13:44:53.477713+00:00",
+  "schema_version": 1,
+  "status": "PARTIAL",
+  "status_rule": "PASS requires all required evidence items to pass; PARTIAL means archived measurements are valid but a required capture is missing."
+}

@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "status": "PASS",
+  "case": "drop_request",
+  "verified_unix_ns": 1786631165887271588,
+  "seq": 2001,
+  "retry_attempt": 2,
+  "rtt_ns": 42184000,
+  "client_log": {
+    "path": "test-records/20260813_221609/drop_first_request_client.log",
+    "sha256": "c90bb4347ab8fe53be058820babaf9b72f72c2eda9fc97f7b8d343e8933dafcb"
+  },
+  "forwarder_record": {
+    "path": "test-records/20260813_221609/drop_first_request_forwarder.json",
+    "sha256": "8c7d15a3076f89ef5fd04eb7bc2315a34a5e595e6a24cf08d4ab509897bff0f5"
+  }
+}

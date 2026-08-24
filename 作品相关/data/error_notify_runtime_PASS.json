@@ -1,0 +1,11 @@
+{
+  "status": "PASS",
+  "case": "error_notify_runtime",
+  "msg_type": 5,
+  "error_code": 3,
+  "payload_error_code": 3,
+  "error_count": 1,
+  "topology_manifest_sha256": "f3ab5b15232bed03353404e38af7b5687f16d3c285d8066e17e80dae42b2e6b9",
+  "server_firmware_sha256": "0804ed8fd3fef371e1a25205d52d39148f4b2cad1d77146335c8bae582d176a6",
+  "evidence": "StarryOS serial output from /root/direct-v2/aictrl_v2_error_notify_probe 10.77.0.3 5000"
+}

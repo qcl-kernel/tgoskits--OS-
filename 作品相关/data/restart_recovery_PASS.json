@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "status": "PASS",
+  "case": "rtthread_restart_and_aictrl_recovery",
+  "verified_unix_ns": 1786632419457246287,
+  "target": "127.0.0.1:5000",
+  "before_last_seq": 10099,
+  "outage_attempts": 3,
+  "post_restart_initial_status": {
+    "last_seq": 0,
+    "rx_count": 1,
+    "err_count": 0,
+    "last_error": 0,
+    "strategy_id": 0,
+    "kp": 0.0,
+    "ki": 0.0,
+    "kd": 0.0
+  },
+  "post_restart_final_status": {
+    "last_seq": 1001,
+    "rx_count": 13,
+    "err_count": 7,
+    "last_error": 5,
+    "strategy_id": 9,
+    "kp": 0.75,
+    "ki": 0.0625,
+    "kd": 0.015625
+  },
+  "post_restart_case_count": 13,
+  "evidence": [
+    {
+      "path": "test-records/20260813_221609/restart_before_available.json",
+      "sha256": "01b04ffa9aaf731fb391cbb0edb5c7a73cb62b5a7123e17b9ec4f97f55b7ab93"
+    },
+    {
+      "path": "test-records/20260813_221609/restart_unavailable.json",
+      "sha256": "1dcce7551a0453a51ac6e021e7c088597cc6593f85fdfbc853a82a59ac561abb"
+    },
+    {
+      "path": "test-records/20260813_221609/restart_after_protocol.json",
+      "sha256": "3c9c8787da45ec504d9f875a6fc3e423a86e9a26e690f64905c0f06a3a542644"
+    }
+  ]
+}

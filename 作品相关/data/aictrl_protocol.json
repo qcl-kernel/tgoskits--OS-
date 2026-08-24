@@ -1,0 +1,135 @@
+{
+  "schema_version": 1,
+  "run_id": "20260813T221609",
+  "status": "PASS",
+  "target": "127.0.0.1:5000",
+  "started_unix_ns": 1786630569487755159,
+  "finished_unix_ns": 1786630569496984625,
+  "case_count": 13,
+  "cases": [
+    {
+      "name": "initial_status",
+      "status": "PASS",
+      "elapsed_ms": 1.53272,
+      "seq": 285212673,
+      "msg_type": 4,
+      "error_code": 0
+    },
+    {
+      "name": "control_apply",
+      "status": "PASS",
+      "elapsed_ms": 1.032106,
+      "seq": 1000,
+      "msg_type": 2,
+      "error_code": 0
+    },
+    {
+      "name": "status_feedback",
+      "status": "PASS",
+      "elapsed_ms": 0.448182,
+      "seq": 1100,
+      "msg_type": 4,
+      "error_code": 0
+    },
+    {
+      "name": "duplicate_sequence",
+      "status": "PASS",
+      "elapsed_ms": 0.542171,
+      "seq": 1000,
+      "msg_type": 2,
+      "error_code": 0
+    },
+    {
+      "name": "old_sequence",
+      "status": "PASS",
+      "elapsed_ms": 0.587253,
+      "seq": 999,
+      "msg_type": 2,
+      "error_code": 6
+    },
+    {
+      "name": "bad_magic",
+      "status": "PASS",
+      "elapsed_ms": 0.467116,
+      "seq": 1001,
+      "msg_type": 2,
+      "error_code": 1
+    },
+    {
+      "name": "bad_version",
+      "status": "PASS",
+      "elapsed_ms": 0.457124,
+      "seq": 1001,
+      "msg_type": 2,
+      "error_code": 2
+    },
+    {
+      "name": "bad_message_type",
+      "status": "PASS",
+      "elapsed_ms": 0.537423,
+      "seq": 1001,
+      "msg_type": 2,
+      "error_code": 3
+    },
+    {
+      "name": "bad_control_length",
+      "status": "PASS",
+      "elapsed_ms": 0.60843,
+      "seq": 1001,
+      "msg_type": 2,
+      "error_code": 4
+    },
+    {
+      "name": "bad_status_length",
+      "status": "PASS",
+      "elapsed_ms": 0.610691,
+      "seq": 1101,
+      "msg_type": 4,
+      "error_code": 4
+    },
+    {
+      "name": "bad_checksum",
+      "status": "PASS",
+      "elapsed_ms": 0.461936,
+      "seq": 1001,
+      "msg_type": 2,
+      "error_code": 5
+    },
+    {
+      "name": "control_after_errors",
+      "status": "PASS",
+      "elapsed_ms": 0.764751,
+      "seq": 1001,
+      "msg_type": 2,
+      "error_code": 0
+    },
+    {
+      "name": "final_status_after_recovery",
+      "status": "PASS",
+      "elapsed_ms": 0.441726,
+      "seq": 1102,
+      "msg_type": 4,
+      "error_code": 0
+    }
+  ],
+  "initial_status": {
+    "last_seq": 0,
+    "rx_count": 1,
+    "err_count": 0,
+    "last_error": 0,
+    "strategy_id": 0,
+    "kp": 0.0,
+    "ki": 0.0,
+    "kd": 0.0
+  },
+  "final_status": {
+    "last_seq": 1001,
+    "rx_count": 13,
+    "err_count": 7,
+    "last_error": 5,
+    "strategy_id": 9,
+    "kp": 0.75,
+    "ki": 0.0625,
+    "kd": 0.015625
+  }
+}

@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "status": "PASS",
+  "generated_unix_ns": 1787396801708391399,
+  "record_count": 11,
+  "records": [
+    {
+      "path": "test-records/20260810_stress_verified.json",
+      "sha256": "015834ac43263ea787f415e1bf895e20ef2e7a74c5b74e9cec612dfdb80b9462",
+      "status": "PASS",
+      "case": null,
+      "case_count": null,
+      "total_rounds": 11510
+    },
+    {
+      "path": "test-records/20260813_221609/aictrl_protocol.json",
+      "sha256": "0d5c3e15e689a08e7b2eb1193d64f5cdeecd9f8b23b722a0b8cbe62ce7550b94",
+      "status": "PASS",
+      "case": null,
+      "case_count": 13,
+      "total_rounds": null
+    },
+    {
+      "path": "test-records/20260813_221609/drop_first_request_PASS.json",
+      "sha256": "921bd7746e03258adb02a7ec99f03b1ee0378766d77970b052a0a8e5162edd53",
+      "status": "PASS",
+      "case": "drop_request",
+      "case_count": null,
+      "total_rounds": null
+    },
+    {
+      "path": "test-records/20260813_221609/drop_first_reply_PASS.json",
+      "sha256": "2af00062d6b1411363226f663103298158012e60ea53339b6ed1b08879af3c21",
+      "status": "PASS",
+      "case": "drop_reply",
+      "case_count": null,
+      "total_rounds": null
+    },
+    {
+      "path": "test-records/20260813_221609/batch100_relay_match_PASS.json",
+      "sha256": "5ea3cbc2b0c482bc95285f423a065616a9f2428881482c70d29e38c99ad59d68",
+      "status": "PASS",
+      "case": "starry_batch_relay_count_match",
+      "case_count": null,
+      "total_rounds": null
+    },
+    {
+      "path": "test-records/20260813_221609/resource_recovery_PASS.json",
+      "sha256": "9f14af484afa51530c4314d1fbec75ad04212c72af47590f6fcf3a95f49e0c20",
+      "status": "PASS",
+      "case": "starry_qemu_resource_recovery",
+      "case_count": null,
+      "total_rounds": null
+    },
+    {
+      "path": "test-records/20260813_221609/restart_recovery_PASS.json",
+      "sha256": "25635c89b3befaeea05c1fcaa5e76fcd5bde7ba99e56a044530ce8a939f56386",
+      "status": "PASS",
+      "case": "rtthread_restart_and_aictrl_recovery",
+      "case_count": null,
+      "total_rounds": null
+    },
+    {
+      "path": "test-records/20260813_221609/post_restart_starry_recovery_PASS.json",
+      "sha256": "aabac9da465c3b9545a8cafad550179f575afcf95d6ed8aa65a884a34ebafdd2",
+      "status": "PASS",
+      "case": "starry_batch_relay_count_match",
+      "case_count": null,
+      "total_rounds": null
+    },
+    {
+      "path": "test-records/20260813_221609/duplicate_state_PASS.json",
+      "sha256": "82a9929d912c8543f95d95cdfca48434655ff4942fe84de600a407076f30082c",
+      "status": "PASS",
+      "case": "duplicate_sequence_state_unchanged",
+      "case_count": null,
+      "total_rounds": null
+    },
+    {
+      "path": "test-records/20260813_221609/retry_exhaustion_PASS.json",
+      "sha256": "861bf702d9b4f1c3c5ba1825033c21deb4e416cf79ae4bfb4d9b772192214dc7",
+      "status": "PASS",
+      "case": "starry_retry_exhaustion",
+      "case_count": null,
+      "total_rounds": null
+    },
+    {
+      "path": "test-records/20260813_221609/local_checks_PASS.json",
+      "sha256": "e72bb8b1375ad96eae08c5d669043d55397b17715baaa9d449fc98519de1948b",
+      "status": "PASS",
+      "case": "local_syntax_and_strict_compile",
+      "case_count": null,
+      "total_rounds": null
+    }
+  ]
+}

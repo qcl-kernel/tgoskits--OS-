@@ -1,0 +1,6 @@
+c4961d773411b7ca5e50c6d13e8c4c53d09f2808204fe3d6e108002f7038b252  /home/whiecloud/transfer-to-vm/task1-artifacts/results/task1-missing-items-checklist.json
+59240ad24d91b03d00bbcf4789a7553ca58c9d328a4a4ae54cc1bbd8bc1cf184  /home/whiecloud/transfer-to-vm/task1-artifacts/TASK1_MISSING_ITEMS_CHECKLIST.md
+b889548b73b1de461c43537cbcf9b9da2eac3718c2e9ec06404a83ac32cee25c  /home/whiecloud/transfer-to-vm/task1-artifacts/results/axvisor-runtime-capture-20260822.json
+7966879e413c7876c70f9fe4055d0df24312020beb0f8d2f185cbce193d68a2d  /home/whiecloud/transfer-to-vm/task1-artifacts/scripts/acceptance_audit.py
+e2b709986484d95fc2add08b11d21d1f4bfa756015a99ac28950c6c68a52688b  /home/whiecloud/transfer-to-vm/task1-artifacts/experiments/README.md
+f5b90b04156b78b4525269610a62a80ab477846edfdb16d593f5bedaea77ac50  /home/whiecloud/transfer-to-vm/task1-artifacts/results/trace-correlation-manifest.json

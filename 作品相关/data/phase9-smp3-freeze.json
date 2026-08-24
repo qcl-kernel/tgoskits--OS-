@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "run_id": "phase9-smp3-freeze-20260821",
+  "status": "PASS",
+  "smp_ipi_runs": [
+    {"log": "task1-artifacts/logs/phase9-smp3-run1-fixed.log", "guest_vcpus": 3, "guest_marker": "guest smp ipi pass!", "result": "PASS smp-ipi; 1/1 case(s) passed"},
+    {"log": "task1-artifacts/logs/phase9-smp3-run2-fixed.log", "guest_vcpus": 3, "guest_marker": "guest smp ipi pass!", "result": "PASS smp-ipi; 1/1 case(s) passed"}
+  ],
+  "host_root": "/dev/nvme0n1",
+  "guest_root": "/dev/vda",
+  "companion_tests": [
+    {"log": "task1-artifacts/logs/phase9-root-selector.log", "result": "4 passed"},
+    {"log": "task1-artifacts/logs/phase9-axvm-host-test.log", "result": "149 passed"}
+  ],
+  "scope_note": "This closes the requested SMP3 regression rerun only. Optimization-before/after pairing, RTOS baseline matrix, and event trace-to-jitter correlation remain separate uncompleted acceptance items."
+}

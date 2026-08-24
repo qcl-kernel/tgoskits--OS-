@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "status": "PASS",
+  "scope": "RT-Thread native and RT-Thread on AxVisor serial captures",
+  "results": [
+    {
+      "platform": "native",
+      "scenario": "continuous_1ms",
+      "samples": 2000,
+      "missed": 0,
+      "jitter_ns": {
+        "avg": 5385,
+        "max": 198528,
+        "p99": 110848,
+        "p999": 178320
+      },
+      "source": "baselines/rtthread-native/closure-rerun-native.log"
+    },
+    {
+      "platform": "native",
+      "scenario": "periodic_idle_10ms",
+      "samples": 6000,
+      "missed": 0,
+      "jitter_ns": {
+        "avg": 152837,
+        "max": 1645136,
+        "p99": 366896,
+        "p999": 568944
+      },
+      "source": "baselines/rtthread-native/closure-rerun-native.log"
+    },
+    {
+      "platform": "native",
+      "scenario": "periodic_stress_long_10ms",
+      "samples": 60000,
+      "missed": 0,
+      "jitter_ns": {
+        "avg": 109916,
+        "max": 2125712,
+        "p99": 309936,
+        "p999": 522928
+      },
+      "source": "baselines/rtthread-native/closure-rerun-native.log"
+    },
+    {
+      "platform": "axvisor",
+      "scenario": "continuous_1ms",
+      "samples": 2000,
+      "missed": 0,
+      "jitter_ns": {
+        "avg": 30774,
+        "max": 747744,
+        "p99": 544368,
+        "p999": 697600
+      },
+      "source": "baselines/rtthread-axvisor/closure-rerun-axvisor.log"
+    },
+    {
+      "platform": "axvisor",
+      "scenario": "periodic_idle_10ms",
+      "samples": 6000,
+      "missed": 0,
+      "jitter_ns": {
+        "avg": 543477,
+        "max": 3631248,
+        "p99": 1013568,
+        "p999": 1394720
+      },
+      "source": "baselines/rtthread-axvisor/closure-rerun-axvisor.log"
+    },
+    {
+      "platform": "axvisor",
+      "scenario": "periodic_stress_long_10ms",
+      "samples": 60000,
+      "missed": 0,
+      "jitter_ns": {
+        "avg": 391474,
+        "max": 3230128,
+        "p99": 832304,
+        "p999": 1276176
+      },
+      "source": "baselines/rtthread-axvisor/closure-rerun-axvisor.log"
+    }
+  ],
+  "notes": [
+    "These are periodic-task timing captures, not hardware IRQ response latency.",
+    "Zephyr native_sim raw/build evidence is archived but is a virtual-clock functional baseline.",
+    "Strict optimized-before pairing remains pending."
+  ]
+}

@@ -1,0 +1,3 @@
+# serial-captured guest log
+# command: /root/direct-v2/aictrl_client_v2 10.77.0.3 5000 2000000
+DIRECT_V2_SUMMARY rounds=2000000 requests=4000000 success=4000000 failure=0 timeout=0 retry=0 duplicate=0 old_seq=0 protocol_error=0 rtt_samples=200000 rtt_us_p50=487 rtt_us_p95=636 rtt_us_p99=795 rtt_us_p999=9158 throughput_rps=1895.53 duration_ms=2110227

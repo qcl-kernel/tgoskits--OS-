@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "status": "PENDING",
+  "reason": "optimized-before paired raw data is not archived",
+  "comparison_keys": [
+    "workload",
+    "period_ns",
+    "duration_s",
+    "host",
+    "qemu",
+    "guest",
+    "toolchain"
+  ],
+  "before": null,
+  "after": {
+    "workload": "starry-userspace-periodic",
+    "period_ns": 5000000,
+    "duration_s": 1800,
+    "guest": "StarryOS riscv64 on AxVisor",
+    "raw_data": [
+      "results/starry_idle_5ms_30min_r1.csv",
+      "results/starry_idle_5ms_30min_r2.csv",
+      "results/starry_idle_5ms_30min_r3.csv",
+      "results/starry_idle_5ms_30min_r4.csv"
+    ]
+  },
+  "required_before_fields": [
+    "host",
+    "qemu",
+    "guest",
+    "toolchain",
+    "raw_data",
+    "patch_sha256"
+  ],
+  "note": "PENDING is an evidence status, not a performance result. Do not calculate an optimization delta until both manifests pass metadata validation.",
+  "attempts": [
+    {
+      "path": "results/strict/direct-starry-qemu-attempt-20260822.log",
+      "exit_code": 124,
+      "classification": "BLOCKED_NOT_AXVISOR",
+      "observed": "direct StarryOS QEMU path; log reports smp = 1; no AxVisor VM"
+    },
+    {
+      "path": "results/strict/axvisor-linux-smp3-capture-rootfs-20260822.log",
+      "exit_code": 124,
+      "classification": "PASS_HOST_RUNTIME_ONLY",
+      "observed": "AxVisor host booted Linux guest; 4 host CPUs, 3 guest vCPUs, SBI IPI detected; not StarryOS"
+    }
+  ],
+  "blocking_evidence": "The available StarryOS QEMU run is not a valid before/after side because it bypasses AxVisor."
+}

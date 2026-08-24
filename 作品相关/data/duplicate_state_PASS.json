@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "status": "PASS",
+  "case": "duplicate_sequence_state_unchanged",
+  "target": "127.0.0.1:5000",
+  "started_unix_ns": 1786633241742760538,
+  "finished_unix_ns": 1786633241746088487,
+  "control_seq": 2001,
+  "first_ack": [
+    2001,
+    1
+  ],
+  "duplicate_ack": [
+    2001,
+    1
+  ],
+  "applied_values": {
+    "strategy_id": 17,
+    "kp": 1.75,
+    "ki": 0.175,
+    "kd": 0.0175
+  },
+  "rejected_duplicate_values": {
+    "strategy_id": 99,
+    "kp": 9.5,
+    "ki": 8.5,
+    "kd": 7.5
+  },
+  "observed_status": {
+    "last_seq": 2001,
+    "rx_count": 17,
+    "err_count": 7,
+    "last_error": 5,
+    "strategy_id": 17,
+    "kp": 1.75,
+    "ki": 0.17499999701976776,
+    "kd": 0.017500000074505806
+  }
+}

@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "status": "PASS",
+  "verified_unix_ns": 1786630493121786999,
+  "log_count": 3,
+  "total_rounds": 11510,
+  "total_requests": 23020,
+  "records": [
+    {
+      "name": "stress510_batch_rerun.log",
+      "status": "PASS",
+      "sha256": "52d208262dd851e51098aa351d6b43341fc7493e9fe1b80c290fbfe37a585ba4",
+      "rounds": 510,
+      "control_total": 510,
+      "control_success": 510,
+      "control_failed": 0,
+      "status_total": 510,
+      "status_success": 510,
+      "status_failed": 0,
+      "retry_sends": 0
+    },
+    {
+      "name": "stress1000_batch.log",
+      "status": "PASS",
+      "sha256": "45322548e16e33e88916e83f517b262ecbc6117bb0945121bef3107175395953",
+      "rounds": 1000,
+      "control_total": 1000,
+      "control_success": 1000,
+      "control_failed": 0,
+      "status_total": 1000,
+      "status_success": 1000,
+      "status_failed": 0,
+      "retry_sends": 0
+    },
+    {
+      "name": "stress10000_batch.log",
+      "status": "PASS",
+      "sha256": "43775fc2d418fa4f1698e652a71a9dd1a2b6c4a4f916ece4c190ad348d8982ea",
+      "rounds": 10000,
+      "control_total": 10000,
+      "control_success": 10000,
+      "control_failed": 0,
+      "status_total": 10000,
+      "status_success": 10000,
+      "status_failed": 0,
+      "retry_sends": 0
+    }
+  ]
+}

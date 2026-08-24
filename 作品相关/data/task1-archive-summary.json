@@ -1,0 +1,66 @@
+{
+  "results": [
+    {
+      "file": "/home/whiecloud/transfer-to-vm/task1-artifacts/results/starry_idle_5ms_30min_r1.csv",
+      "jitter_ns": {
+        "maximum": 22179100,
+        "p50": 234200,
+        "p95": 755500,
+        "p99": 3097600,
+        "p999": 4769500
+      },
+      "missed": 261,
+      "missed_rate": 0.000725,
+      "samples": 360000,
+      "seq_first": 0,
+      "seq_last": 359999
+    },
+    {
+      "file": "/home/whiecloud/transfer-to-vm/task1-artifacts/results/starry_idle_5ms_30min_r2.csv",
+      "jitter_ns": {
+        "maximum": 34939556900,
+        "p50": 237100,
+        "p95": 1800300,
+        "p99": 19844641400,
+        "p999": 33392894500
+      },
+      "missed": 8395,
+      "missed_rate": 0.023319444444444445,
+      "samples": 360000,
+      "seq_first": 0,
+      "seq_last": 359999
+    },
+    {
+      "file": "/home/whiecloud/transfer-to-vm/task1-artifacts/results/starry_idle_5ms_30min_r3.csv",
+      "jitter_ns": {
+        "maximum": 51445400,
+        "p50": 236800,
+        "p95": 715400,
+        "p99": 2999600,
+        "p999": 4565900
+      },
+      "missed": 196,
+      "missed_rate": 0.0005444444444444444,
+      "samples": 360000,
+      "seq_first": 0,
+      "seq_last": 359999
+    },
+    {
+      "file": "/home/whiecloud/transfer-to-vm/task1-artifacts/results/starry_idle_5ms_30min_r4.csv",
+      "jitter_ns": {
+        "maximum": 26011700,
+        "p50": 262000,
+        "p95": 710300,
+        "p99": 2912800,
+        "p999": 4494700
+      },
+      "missed": 178,
+      "missed_rate": 0.0004944444444444445,
+      "samples": 360000,
+      "seq_first": 0,
+      "seq_last": 359999
+    }
+  ],
+  "schema_version": 1,
+  "status": "PASS"
+}

@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "status": "PASS",
+  "case": "direct_tap_drop_first_packet_retry",
+  "topology_manifest_sha256": "f3ab5b15232bed03353404e38af7b5687f16d3c285d8066e17e80dae42b2e6b9",
+  "tap": "aictrl-rt",
+  "loss_window_s": 2.5,
+  "client": "StarryOS /root/direct-v2/aictrl_client_v2",
+  "serial_log": {
+    "path": "/home/whiecloud/transfer-to-vm/task2-artifacts/results/direct-v2/direct-fault-live-client.log",
+    "sha256": "9214fbec9d796832a67fe6025f6dafc90f770210ba1c497d73d4450d00133321"
+  },
+  "summary": {
+    "rounds": 1,
+    "requests": 2,
+    "success": 2,
+    "failure": 0,
+    "timeout": 1,
+    "retry": 1,
+    "duplicate": 0,
+    "old_seq": 0,
+    "protocol_error": 0
+  },
+  "mechanism": "tc netem loss 100% on RT-Thread-side TAP with automatic recovery; no relay or hostfwd",
+  "note": "Captured serial output includes one timeout followed by successful retry recovery."
+}
