@@ -2,6 +2,7 @@
 
 use alloc::{
     collections::{BTreeMap, BTreeSet, VecDeque},
+    string::String,
     sync::Arc,
     vec::Vec,
 };
@@ -20,6 +21,8 @@ use output::GuestOutputMux;
 
 const CTRL_X: u8 = 0x18;
 const INPUT_QUEUE_CAPACITY: usize = 4096;
+const TRACE_LINE_CAPACITY: usize = 256;
+const TRACE_PREFIX: &[u8] = b"rtprobe-trace ";
 
 static GUEST_CONSOLE_MUX: LazyLock<GuestConsoleMux> = LazyLock::new(GuestConsoleMux::new);
 
@@ -84,6 +87,14 @@ struct BackendGeneration(u64);
 struct GuestState {
     backend_generation: Option<BackendGeneration>,
     input: VecDeque<u8>,
+    trace_line: Vec<u8>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct GuestTraceMarker {
+    run_id: String,
+    seq: u64,
+    ts_ns: u64,
 }
 
 #[derive(Debug)]
@@ -422,10 +433,79 @@ impl ConsoleCore {
         }
 
         let _output_guard = self.lock_output();
+        let trace_markers = self.capture_guest_trace(vm_id, generation, bytes);
         if let Some(output) = self.format_guest_output(vm_id, generation, bytes) {
             write_host_bytes(&output);
         }
+        for marker in trace_markers {
+            info!(
+                "axvisor-trace vm_id={vm_id} run_id={} seq={} ts_ns={} event=guest-serial-marker",
+                marker.run_id, marker.seq, marker.ts_ns
+            );
+        }
     }
+
+    fn capture_guest_trace(
+        &self,
+        vm_id: VMId,
+        generation: BackendGeneration,
+        bytes: &[u8],
+    ) -> Vec<GuestTraceMarker> {
+        let mut state = self.lock_state();
+        let Some(guest) = state
+            .guests
+            .get_mut(&vm_id)
+            .filter(|guest| guest.backend_generation == Some(generation))
+        else {
+            return Vec::new();
+        };
+        let mut markers = Vec::new();
+        for &byte in bytes {
+            if byte == b"\n"[0] {
+                if let Some(marker) = parse_trace_marker(&guest.trace_line) {
+                    markers.push(marker);
+                }
+                guest.trace_line.clear();
+            } else if byte != b"\r"[0] {
+                if guest.trace_line.len() < TRACE_LINE_CAPACITY {
+                    guest.trace_line.push(byte);
+                } else {
+                    guest.trace_line.clear();
+                }
+            }
+        }
+        markers
+    }
+}
+
+fn parse_trace_marker(line: &[u8]) -> Option<GuestTraceMarker> {
+    let text = core::str::from_utf8(line).ok()?;
+    let rest = text.strip_prefix(core::str::from_utf8(TRACE_PREFIX).ok()?)?;
+    let mut run_id = None;
+    let mut seq = None;
+    let mut ts_ns = None;
+    for field in rest.split_ascii_whitespace() {
+        if let Some(value) = field.strip_prefix("run_id=") {
+            if !value.is_empty()
+                && value
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b"-"[0] || b == b"_"[0])
+            {
+                run_id = Some(String::from(value));
+            } else {
+                return None;
+            }
+        } else if let Some(value) = field.strip_prefix("seq=") {
+            seq = value.parse().ok();
+        } else if let Some(value) = field.strip_prefix("ts_ns=") {
+            ts_ns = value.parse().ok();
+        }
+    }
+    Some(GuestTraceMarker {
+        run_id: run_id?,
+        seq: seq?,
+        ts_ns: ts_ns?,
+    })
 }
 
 impl SerialBackend for GuestSerialBackend {

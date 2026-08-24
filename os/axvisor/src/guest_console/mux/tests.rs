@@ -10,6 +10,67 @@ fn route_shortcut(mux: &GuestConsoleMux, suffix: u8) -> ConsoleInputEvent {
 
 #[cfg_attr(axtest, axtest::axtest)]
 #[cfg_attr(not(axtest), test)]
+fn trace_marker_parser_accepts_the_probe_contract() {
+    assert_eq!(
+        parse_trace_marker(b"rtprobe-trace run_id=after_20260822 seq=42 ts_ns=123456"),
+        Some(GuestTraceMarker {
+            run_id: String::from("after_20260822"),
+            seq: 42,
+            ts_ns: 123456,
+        })
+    );
+}
+
+#[cfg_attr(axtest, axtest::axtest)]
+#[cfg_attr(not(axtest), test)]
+fn trace_marker_capture_survives_fragmented_serial_writes() {
+    let mux = GuestConsoleMux::new();
+    let backend = mux.core.create_serial_backend(1);
+    assert!(
+        mux.core
+            .capture_guest_trace(1, backend.generation, b"rtprobe-trace run_id=run-1 seq=")
+            .is_empty()
+    );
+    assert_eq!(
+        mux.core
+            .capture_guest_trace(1, backend.generation, b"7 ts_ns=99\r\n"),
+        vec![GuestTraceMarker {
+            run_id: String::from("run-1"),
+            seq: 7,
+            ts_ns: 99,
+        }]
+    );
+}
+
+#[cfg_attr(axtest, axtest::axtest)]
+#[cfg_attr(not(axtest), test)]
+fn trace_marker_capture_rejects_stale_backends_and_invalid_lines() {
+    let mux = GuestConsoleMux::new();
+    let backend = mux.core.create_serial_backend(1);
+    mux.mark_stopped(1);
+    assert!(
+        mux.core
+            .capture_guest_trace(
+                1,
+                backend.generation,
+                b"rtprobe-trace run_id=x seq=0 ts_ns=1\n"
+            )
+            .is_empty()
+    );
+    let current = mux.core.create_serial_backend(1);
+    assert!(
+        mux.core
+            .capture_guest_trace(
+                1,
+                current.generation,
+                b"rtprobe-trace run_id=x seq=bad ts_ns=1\n"
+            )
+            .is_empty()
+    );
+}
+
+#[cfg_attr(axtest, axtest::axtest)]
+#[cfg_attr(not(axtest), test)]
 fn ctrl_x_h_detaches_the_foreground_guest() {
     let mux = GuestConsoleMux::new();
     mux.core.create_serial_backend(7);
